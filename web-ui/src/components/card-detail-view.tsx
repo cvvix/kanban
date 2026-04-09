@@ -243,7 +243,16 @@ function DiffModeButton({
 			variant="ghost"
 			size="sm"
 			onClick={onClick}
-			className={cn("h-5 rounded-sm text-xs", active && "bg-surface-3 text-text-primary")}
+			aria-pressed={active}
+			className="h-5 rounded-sm text-xs"
+			style={
+				active
+					? {
+							backgroundColor: "var(--color-surface-3)",
+							color: "var(--color-text-primary)",
+						}
+					: undefined
+			}
 		>
 			{children}
 		</Button>
