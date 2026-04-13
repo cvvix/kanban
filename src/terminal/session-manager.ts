@@ -51,6 +51,7 @@ type RestartableSessionRequest =
 interface ActiveProcessState {
 	session: PtySession;
 	workspaceTrustBuffer: string | null;
+	deferredStartupBuffer: string | null;
 	cols: number;
 	rows: number;
 	terminalProtocolFilter: TerminalProtocolFilterState;
@@ -195,6 +196,11 @@ function buildTerminalEnvironment(
 function hasCodexInteractivePrompt(text: string): boolean {
 	const stripped = stripAnsi(text);
 	return /(?:^|[\n\r])\s*›\s*/u.test(stripped);
+}
+
+function hasHermesInteractivePrompt(text: string): boolean {
+	const stripped = stripAnsi(text);
+	return /(?:^|[\n\r])\s*❯\s*/u.test(stripped);
 }
 
 function hasCodexStartupUiRendered(text: string): boolean {
@@ -370,6 +376,7 @@ export class TerminalSessionManager implements TerminalSessionService {
 
 					const needsDecodedOutput =
 						entry.active.workspaceTrustBuffer !== null ||
+						entry.active.deferredStartupInput !== null ||
 						(entry.active.detectOutputTransition !== null &&
 							(entry.active.shouldInspectOutputForTransition?.(entry.summary) ?? true));
 					const data = needsDecodedOutput ? filteredChunk.toString("utf8") : "";
@@ -393,8 +400,6 @@ export class TerminalSessionManager implements TerminalSessionService {
 										return;
 									}
 									activeEntry.session.write("\r");
-									// Trust text can remain in the rolling buffer after we auto-confirm.
-									// Clear it so later startup/prompt checks do not match stale trust output.
 									if (activeEntry.workspaceTrustBuffer !== null) {
 										activeEntry.workspaceTrustBuffer = "";
 									}
@@ -403,21 +408,38 @@ export class TerminalSessionManager implements TerminalSessionService {
 							}
 						}
 					}
+					if (entry.active.deferredStartupBuffer !== null && data.length > 0) {
+						entry.active.deferredStartupBuffer += data;
+						if (entry.active.deferredStartupBuffer.length > MAX_WORKSPACE_TRUST_BUFFER_CHARS) {
+							entry.active.deferredStartupBuffer = entry.active.deferredStartupBuffer.slice(
+								-MAX_WORKSPACE_TRUST_BUFFER_CHARS,
+							);
+						}
+					}
 					updateSummary(entry, { lastOutputAt: now() });
 
-					// Codex plan-mode startup input is deferred until we know the TUI rendered.
-					// Trigger on either the interactive prompt marker or the startup header text.
-					if (
-						entry.summary.agentId === "codex" &&
-						entry.active.deferredStartupInput !== null &&
-						data.length > 0 &&
-						(hasCodexInteractivePrompt(data) ||
-							hasCodexStartupUiRendered(data) ||
-							(entry.active.workspaceTrustBuffer !== null &&
-								(hasCodexInteractivePrompt(entry.active.workspaceTrustBuffer) ||
-									hasCodexStartupUiRendered(entry.active.workspaceTrustBuffer))))
-					) {
-						this.trySendDeferredCodexStartupInput(request.taskId);
+					// Codex and Hermes can defer their initial startup input until the TUI prompt renders.
+					if (entry.active.deferredStartupInput !== null && data.length > 0) {
+						const shouldSendDeferredStartupInput =
+							(entry.summary.agentId === "codex" &&
+								(hasCodexInteractivePrompt(data) ||
+									hasCodexStartupUiRendered(data) ||
+									(entry.active.workspaceTrustBuffer !== null &&
+										(hasCodexInteractivePrompt(entry.active.workspaceTrustBuffer) ||
+											hasCodexStartupUiRendered(entry.active.workspaceTrustBuffer))))) ||
+							(entry.summary.agentId === "hermes" &&
+								((entry.active.deferredStartupBuffer !== null &&
+									hasHermesInteractivePrompt(entry.active.deferredStartupBuffer)) ||
+									hasHermesInteractivePrompt(data)));
+						if (shouldSendDeferredStartupInput) {
+							if (entry.summary.agentId === "codex") {
+								this.trySendDeferredCodexStartupInput(request.taskId);
+							} else {
+								const deferredInput = entry.active.deferredStartupInput;
+								entry.active.deferredStartupInput = null;
+								entry.active.session.write(deferredInput);
+							}
+						}
 					}
 
 					const adapterEvent = entry.active.detectOutputTransition?.(data, entry.summary) ?? null;
@@ -512,6 +534,7 @@ export class TerminalSessionManager implements TerminalSessionService {
 				hasCodexLaunchSignature
 					? ""
 					: null,
+			deferredStartupBuffer: launch.deferredStartupInput ? "" : null,
 			cols,
 			rows,
 			terminalProtocolFilter: createTerminalProtocolFilterState({
@@ -666,6 +689,7 @@ export class TerminalSessionManager implements TerminalSessionService {
 		const active: ActiveProcessState = {
 			session,
 			workspaceTrustBuffer: null,
+			deferredStartupBuffer: null,
 			cols,
 			rows,
 			terminalProtocolFilter: createTerminalProtocolFilterState({

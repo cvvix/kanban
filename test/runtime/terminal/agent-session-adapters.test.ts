@@ -377,6 +377,48 @@ describe("prepareAgentLaunch hook strategies", () => {
 		expect(config.hooks?.stop?.[0]?.command).toContain("Waiting for review");
 	});
 
+	it("starts Hermes task sessions in interactive mode and defers the initial prompt", async () => {
+		setupTempHome();
+		const launch = await prepareAgentLaunch({
+			taskId: "task-hermes-1",
+			agentId: "hermes",
+			binary: "hermes",
+			args: ["chat"],
+			autonomousModeEnabled: true,
+			cwd: "/tmp",
+			prompt: "Investigate deployment drift",
+			workspaceId: "workspace-1",
+		});
+
+		expect(launch.args).toContain("chat");
+		expect(launch.args).toContain("--yolo");
+		expect(launch.args).toContain("--source");
+		expect(launch.args).toContain("tool");
+		expect(launch.args).toContain("--quiet");
+		expect(launch.args).not.toContain("-q");
+		expect(launch.args).not.toContain("--query");
+		expect(launch.deferredStartupInput).toContain("Investigate deployment drift");
+		expect(launch.deferredStartupInput?.endsWith("\r")).toBe(true);
+	});
+
+	it("defers the soft planning prompt for Hermes plan mode", async () => {
+		setupTempHome();
+		const launch = await prepareAgentLaunch({
+			taskId: "task-hermes-plan",
+			agentId: "hermes",
+			binary: "hermes",
+			args: ["chat"],
+			autonomousModeEnabled: true,
+			cwd: "/tmp",
+			prompt: "Audit the deployment pipeline",
+			startInPlanMode: true,
+		});
+
+		expect(launch.args).not.toContain("-q");
+		expect(launch.deferredStartupInput).toContain("Do not modify files");
+		expect(launch.deferredStartupInput).toContain("Task:\nAudit the deployment pipeline");
+	});
+
 	it("materializes task images for CLI prompts", async () => {
 		setupTempHome();
 		const launch = await prepareAgentLaunch({

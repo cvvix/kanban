@@ -1401,6 +1401,7 @@ const hermesAdapter: AgentSessionAdapter = {
 		const env: Record<string, string | undefined> = {};
 		const appendedSystemPrompt = resolveHomeAgentAppendSystemPrompt(input.taskId);
 		const isHomeSession = isHomeAgentSessionId(input.taskId);
+		let deferredStartupInput: string | undefined;
 
 		if (input.autonomousModeEnabled && !hasCliOption(args, "--yolo")) {
 			args.push("--yolo");
@@ -1426,13 +1427,15 @@ const hermesAdapter: AgentSessionAdapter = {
 		}
 
 		const prompt = input.startInPlanMode ? buildSoftPlanPrompt(input.prompt) : input.prompt;
-		const withPromptLaunch = withPrompt(args, prompt, "flag", "-q");
+		const trimmedPrompt = prompt.trim();
+		if (trimmedPrompt) {
+			deferredStartupInput = toBracketedPasteSubmission(trimmedPrompt);
+		}
+
 		return {
-			...withPromptLaunch,
-			env: {
-				...withPromptLaunch.env,
-				...env,
-			},
+			args,
+			env,
+			deferredStartupInput,
 		};
 	},
 };

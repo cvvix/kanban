@@ -195,4 +195,83 @@ describe("TerminalSessionManager auto-restart", () => {
 		expect(session.write).toHaveBeenCalledWith(deferredStartupInput);
 		expect(session.write).toHaveBeenCalledTimes(1);
 	});
+
+	it("sends deferred Hermes startup input when the interactive prompt appears", async () => {
+		const deferredStartupInput = "\u001b[200~Investigate deployment drift\u001b[201~\r";
+		prepareAgentLaunchMock.mockResolvedValue({
+			binary: "hermes",
+			args: ["chat", "--quiet"],
+			env: {},
+			deferredStartupInput,
+		});
+
+		const spawnedSessions: Array<ReturnType<typeof createMockPtySession>> = [];
+		ptySessionSpawnMock.mockImplementation((request: MockSpawnRequest) => {
+			const session = createMockPtySession(111, request);
+			spawnedSessions.push(session);
+			return session;
+		});
+
+		const manager = new TerminalSessionManager();
+		await manager.startTaskSession({
+			taskId: "task-hermes-1",
+			agentId: "hermes",
+			binary: "hermes",
+			args: ["chat"],
+			cwd: "/tmp/task-hermes-1",
+			prompt: "Investigate deployment drift",
+		});
+
+		const session = spawnedSessions[0];
+		expect(session).toBeDefined();
+		if (!session) {
+			return;
+		}
+
+		session.triggerData("Welcome to Hermes Agent!\n");
+		expect(session.write).not.toHaveBeenCalledWith(deferredStartupInput);
+
+		session.triggerData("\n❯ ");
+		expect(session.write).toHaveBeenCalledWith(deferredStartupInput);
+		expect(session.write).toHaveBeenCalledTimes(1);
+	});
+
+	it("sends deferred Hermes startup input when the prompt marker is split across chunks", async () => {
+		const deferredStartupInput = "\u001b[200~Investigate deployment drift\u001b[201~\r";
+		prepareAgentLaunchMock.mockResolvedValue({
+			binary: "hermes",
+			args: ["chat", "--quiet"],
+			env: {},
+			deferredStartupInput,
+		});
+
+		const spawnedSessions: Array<ReturnType<typeof createMockPtySession>> = [];
+		ptySessionSpawnMock.mockImplementation((request: MockSpawnRequest) => {
+			const session = createMockPtySession(111, request);
+			spawnedSessions.push(session);
+			return session;
+		});
+
+		const manager = new TerminalSessionManager();
+		await manager.startTaskSession({
+			taskId: "task-hermes-2",
+			agentId: "hermes",
+			binary: "hermes",
+			args: ["chat"],
+			cwd: "/tmp/task-hermes-2",
+			prompt: "Investigate deployment drift",
+		});
+
+		const session = spawnedSessions[0];
+		expect(session).toBeDefined();
+		if (!session) {
+			return;
+		}
+
+		session.triggerData("\n");
+		expect(session.write).not.toHaveBeenCalled();
+		session.triggerData("❯ ");
+		expect(session.write).toHaveBeenCalledWith(deferredStartupInput);
+		expect(session.write).toHaveBeenCalledTimes(1);
+	});
 });
