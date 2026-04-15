@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.61]
+
+- Added device code authorization for signing into Cline on remote systems
+- Revamped theme system with new theme picker and improved color palettes
+- Fixed duplicate MCP tool registration when using SDK 0.0.34
+- Fixed MCP settings not showing up during Cline setup
+
 ## [0.1.60]
 
 - Choose a different agent per task, or change the model and provider for Cline tasks, when creating tasks from the board
