@@ -69,6 +69,54 @@ describe("TerminalSessionManager", () => {
 		expect(typeof updated?.lastHookAt).toBe("number");
 	});
 
+	it("returns Hermes to running when the user submits follow-up input from review", () => {
+		const manager = new TerminalSessionManager();
+		const writeSpy = vi.fn();
+		const entry = {
+			summary: createSummary({
+				taskId: "task-hermes",
+				state: "awaiting_review",
+				agentId: "hermes",
+				reviewReason: "hook",
+			}),
+			active: {
+				session: {
+					write: writeSpy,
+				},
+				workspaceTrustBuffer: null,
+				deferredStartupBuffer: null,
+				cols: 120,
+				rows: 40,
+				terminalProtocolFilter: {
+					pendingChunk: null,
+					interceptOscColorQueries: false,
+					suppressDeviceAttributeQueries: false,
+				},
+				onSessionCleanup: null,
+				deferredStartupInput: null,
+				detectOutputTransition: null,
+				shouldInspectOutputForTransition: null,
+				awaitingCodexPromptAfterEnter: false,
+				suppressNextHermesPromptReview: false,
+				autoConfirmedWorkspaceTrust: false,
+				workspaceTrustConfirmTimer: null,
+			},
+			terminalStateMirror: null,
+			listenerIdCounter: 1,
+			listeners: new Map(),
+		};
+		(
+			manager as unknown as {
+				entries: Map<string, typeof entry>;
+			}
+		).entries.set("task-hermes", entry);
+
+		const updated = manager.writeInput("task-hermes", Buffer.from("Continue\r", "utf8"));
+		expect(updated?.state).toBe("running");
+		expect(updated?.reviewReason).toBeNull();
+		expect(writeSpy).toHaveBeenCalledWith(Buffer.from("Continue\r", "utf8"));
+	});
+
 	it("resets stale running sessions without active processes", () => {
 		const manager = new TerminalSessionManager();
 		manager.hydrateFromRecord({

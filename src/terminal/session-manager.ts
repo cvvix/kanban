@@ -60,6 +60,7 @@ interface ActiveProcessState {
 	detectOutputTransition: AgentOutputTransitionDetector | null;
 	shouldInspectOutputForTransition: AgentOutputTransitionInspectionPredicate | null;
 	awaitingCodexPromptAfterEnter: boolean;
+	suppressNextHermesPromptReview: boolean;
 	autoConfirmedWorkspaceTrust: boolean;
 	workspaceTrustConfirmTimer: NodeJS.Timeout | null;
 }
@@ -87,6 +88,7 @@ export interface StartTaskSessionRequest {
 	images?: RuntimeTaskImage[];
 	startInPlanMode?: boolean;
 	resumeFromTrash?: boolean;
+	resumeExistingSession?: boolean;
 	cols?: number;
 	rows?: number;
 	env?: Record<string, string | undefined>;
@@ -331,13 +333,14 @@ export class TerminalSessionManager implements TerminalSessionService {
 			taskId: request.taskId,
 			agentId: request.agentId,
 			binary: request.binary,
-			args: request.args,
+			args: [...request.args],
 			autonomousModeEnabled: request.autonomousModeEnabled,
 			cwd: request.cwd,
 			prompt: request.prompt,
 			images: request.images,
 			startInPlanMode: request.startInPlanMode,
 			resumeFromTrash: request.resumeFromTrash,
+			resumeExistingSession: request.resumeExistingSession,
 			env: request.env,
 			workspaceId: request.workspaceId,
 		});
@@ -437,6 +440,7 @@ export class TerminalSessionManager implements TerminalSessionService {
 							} else {
 								const deferredInput = entry.active.deferredStartupInput;
 								entry.active.deferredStartupInput = null;
+								entry.active.suppressNextHermesPromptReview = true;
 								entry.active.session.write(deferredInput);
 							}
 						}
@@ -444,19 +448,27 @@ export class TerminalSessionManager implements TerminalSessionService {
 
 					const adapterEvent = entry.active.detectOutputTransition?.(data, entry.summary) ?? null;
 					if (adapterEvent) {
-						const requiresEnterForCodex =
-							adapterEvent.type === "agent.prompt-ready" &&
-							entry.summary.agentId === "codex" &&
-							!entry.active.awaitingCodexPromptAfterEnter;
-						if (!requiresEnterForCodex) {
-							const summary = this.applySessionEvent(entry, adapterEvent);
-							if (adapterEvent.type === "agent.prompt-ready" && entry.summary.agentId === "codex") {
-								entry.active.awaitingCodexPromptAfterEnter = false;
+						const shouldSuppressHermesPromptReview =
+							entry.summary.agentId === "hermes" &&
+							adapterEvent.type === "hook.to_review" &&
+							entry.active.suppressNextHermesPromptReview;
+						if (shouldSuppressHermesPromptReview) {
+							entry.active.suppressNextHermesPromptReview = false;
+						} else {
+							const requiresEnterForCodex =
+								adapterEvent.type === "agent.prompt-ready" &&
+								entry.summary.agentId === "codex" &&
+								!entry.active.awaitingCodexPromptAfterEnter;
+							if (!requiresEnterForCodex) {
+								const summary = this.applySessionEvent(entry, adapterEvent);
+								if (adapterEvent.type === "agent.prompt-ready" && entry.summary.agentId === "codex") {
+									entry.active.awaitingCodexPromptAfterEnter = false;
+								}
+								for (const taskListener of entry.listeners.values()) {
+									taskListener.onState?.(cloneSummary(summary));
+								}
+								this.emitSummary(summary);
 							}
-							for (const taskListener of entry.listeners.values()) {
-								taskListener.onState?.(cloneSummary(summary));
-							}
-							this.emitSummary(summary);
 						}
 					}
 
@@ -546,6 +558,7 @@ export class TerminalSessionManager implements TerminalSessionService {
 			detectOutputTransition: launch.detectOutputTransition ?? null,
 			shouldInspectOutputForTransition: launch.shouldInspectOutputForTransition ?? null,
 			awaitingCodexPromptAfterEnter: false,
+			suppressNextHermesPromptReview: false,
 			autoConfirmedWorkspaceTrust: false,
 			workspaceTrustConfirmTimer: null,
 		};
@@ -700,6 +713,7 @@ export class TerminalSessionManager implements TerminalSessionService {
 			detectOutputTransition: null,
 			shouldInspectOutputForTransition: null,
 			awaitingCodexPromptAfterEnter: false,
+			suppressNextHermesPromptReview: false,
 			autoConfirmedWorkspaceTrust: false,
 			workspaceTrustConfirmTimer: null,
 		};
@@ -772,6 +786,20 @@ export class TerminalSessionManager implements TerminalSessionService {
 			(data.includes(13) || data.includes(10))
 		) {
 			entry.active.awaitingCodexPromptAfterEnter = true;
+		}
+		if (
+			entry.summary.agentId === "hermes" &&
+			entry.summary.state === "awaiting_review" &&
+			(entry.summary.reviewReason === "hook" ||
+				entry.summary.reviewReason === "attention" ||
+				entry.summary.reviewReason === "error") &&
+			(data.includes(13) || data.includes(10))
+		) {
+			const summary = this.applySessionEvent(entry, { type: "hook.to_in_progress" });
+			for (const listener of entry.listeners.values()) {
+				listener.onState?.(cloneSummary(summary));
+			}
+			this.emitSummary(summary);
 		}
 		entry.active.session.write(data);
 		return cloneSummary(entry.summary);
@@ -1034,7 +1062,11 @@ export class TerminalSessionManager implements TerminalSessionService {
 		let pendingAutoRestart: Promise<void> | null = null;
 		pendingAutoRestart = (async () => {
 			try {
-				await this.startTaskSession(cloneStartTaskSessionRequest(restartRequest.request));
+				const nextRequest = cloneStartTaskSessionRequest(restartRequest.request);
+				if (nextRequest.agentId === "hermes") {
+					nextRequest.resumeExistingSession = true;
+				}
+				await this.startTaskSession(nextRequest);
 			} catch (error) {
 				const message = error instanceof Error ? error.message : String(error);
 				const summary = updateSummary(entry, {

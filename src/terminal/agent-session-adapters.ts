@@ -35,6 +35,7 @@ export interface AgentAdapterLaunchInput {
 	images?: RuntimeTaskImage[];
 	startInPlanMode?: boolean;
 	resumeFromTrash?: boolean;
+	resumeExistingSession?: boolean;
 	env?: Record<string, string | undefined>;
 	workspaceId?: string;
 }
@@ -751,6 +752,21 @@ function codexPromptDetector(data: string, summary: RuntimeTaskSessionSummary): 
 	return null;
 }
 
+function hermesPromptDetector(data: string, summary: RuntimeTaskSessionSummary): SessionTransitionEvent | null {
+	if (summary.state !== "running") {
+		return null;
+	}
+	const stripped = stripAnsi(data);
+	if (/(?:^|\n)\s*❯\s*/u.test(stripped)) {
+		return { type: "hook.to_review" };
+	}
+	return null;
+}
+
+function shouldInspectHermesOutputForTransition(summary: RuntimeTaskSessionSummary): boolean {
+	return summary.state === "running";
+}
+
 function shouldInspectCodexOutputForTransition(summary: RuntimeTaskSessionSummary): boolean {
 	return (
 		summary.state === "awaiting_review" &&
@@ -1402,6 +1418,7 @@ const hermesAdapter: AgentSessionAdapter = {
 		const appendedSystemPrompt = resolveHomeAgentAppendSystemPrompt(input.taskId);
 		const isHomeSession = isHomeAgentSessionId(input.taskId);
 		let deferredStartupInput: string | undefined;
+		const shouldResumeExistingSession = input.resumeFromTrash || input.resumeExistingSession;
 
 		if (input.autonomousModeEnabled && !hasCliOption(args, "--yolo")) {
 			args.push("--yolo");
@@ -1426,16 +1443,24 @@ const hermesAdapter: AgentSessionAdapter = {
 			args.push("--quiet");
 		}
 
-		const prompt = input.startInPlanMode ? buildSoftPlanPrompt(input.prompt) : input.prompt;
-		const trimmedPrompt = prompt.trim();
-		if (trimmedPrompt) {
-			deferredStartupInput = toBracketedPasteSubmission(trimmedPrompt);
+		if (shouldResumeExistingSession && !hasCliOption(args, "--continue") && !hasCliOption(args, "-c")) {
+			args.push("--continue");
+		}
+
+		if (!shouldResumeExistingSession) {
+			const prompt = input.startInPlanMode ? buildSoftPlanPrompt(input.prompt) : input.prompt;
+			const trimmedPrompt = prompt.trim();
+			if (trimmedPrompt) {
+				deferredStartupInput = toBracketedPasteSubmission(trimmedPrompt);
+			}
 		}
 
 		return {
 			args,
 			env,
 			deferredStartupInput,
+			detectOutputTransition: hermesPromptDetector,
+			shouldInspectOutputForTransition: shouldInspectHermesOutputForTransition,
 		};
 	},
 };

@@ -4,6 +4,7 @@ import { join } from "node:path";
 
 import { afterEach, describe, expect, it } from "vitest";
 
+import { createHomeAgentSessionId } from "../../../src/core/home-agent-session";
 import { prepareAgentLaunch } from "../../../src/terminal/agent-session-adapters";
 
 const originalHome = process.env.HOME;
@@ -377,7 +378,29 @@ describe("prepareAgentLaunch hook strategies", () => {
 		expect(config.hooks?.stop?.[0]?.command).toContain("Waiting for review");
 	});
 
-	it("starts Hermes task sessions in interactive mode and defers the initial prompt", async () => {
+	it("keeps Hermes home sidebar sessions interactive", async () => {
+		setupTempHome();
+		setKanbanProcessContext();
+		const launch = await prepareAgentLaunch({
+			taskId: createHomeAgentSessionId("workspace-1", "hermes"),
+			agentId: "hermes",
+			binary: "hermes",
+			args: ["chat"],
+			autonomousModeEnabled: true,
+			cwd: "/tmp",
+			prompt: "Summarize repo status",
+			workspaceId: "workspace-1",
+		});
+
+		expect(launch.args).toContain("chat");
+		expect(launch.args).toContain("--yolo");
+		expect(launch.args).toContain("--source");
+		expect(launch.args).toContain("tool");
+		expect(launch.args).not.toContain("-q");
+		expect(launch.deferredStartupInput).toBeUndefined();
+	});
+
+	it("starts Hermes task sessions in interactive mode, defers the initial prompt, and marks prompt-ready output as review", async () => {
 		setupTempHome();
 		const launch = await prepareAgentLaunch({
 			taskId: "task-hermes-1",
@@ -399,6 +422,25 @@ describe("prepareAgentLaunch hook strategies", () => {
 		expect(launch.args).not.toContain("--query");
 		expect(launch.deferredStartupInput).toContain("Investigate deployment drift");
 		expect(launch.deferredStartupInput?.endsWith("\r")).toBe(true);
+		expect(
+			launch.detectOutputTransition?.("\n❯ ", {
+				taskId: "task-hermes-1",
+				state: "running",
+				agentId: "hermes",
+				workspacePath: "/tmp",
+				pid: 1,
+				startedAt: Date.now(),
+				updatedAt: Date.now(),
+				lastOutputAt: Date.now(),
+				reviewReason: null,
+				exitCode: null,
+				lastHookAt: null,
+				latestHookActivity: null,
+				warningMessage: null,
+				latestTurnCheckpoint: null,
+				previousTurnCheckpoint: null,
+			}),
+		).toEqual({ type: "hook.to_review" });
 	});
 
 	it("defers the soft planning prompt for Hermes plan mode", async () => {
@@ -622,6 +664,18 @@ describe("prepareAgentLaunch hook strategies", () => {
 			resumeFromTrash: true,
 		});
 		expect(kiroLaunch.args).toContain("--resume");
+
+		const hermesLaunch = await prepareAgentLaunch({
+			taskId: "task-hermes",
+			agentId: "hermes",
+			binary: "hermes",
+			args: ["chat"],
+			cwd: "/tmp",
+			prompt: "",
+			resumeFromTrash: true,
+		});
+		expect(hermesLaunch.args).toContain("--continue");
+		expect(hermesLaunch.deferredStartupInput).toBeUndefined();
 
 		const clineLaunch = await prepareAgentLaunch({
 			taskId: "task-cline",

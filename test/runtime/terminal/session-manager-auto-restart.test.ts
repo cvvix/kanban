@@ -117,6 +117,45 @@ describe("TerminalSessionManager auto-restart", () => {
 		expect(manager.getSummary("task-1")?.pid).toBeNull();
 	});
 
+	it("restarts Hermes sessions by resuming the existing CLI conversation", async () => {
+		const spawnedSessions: Array<ReturnType<typeof createMockPtySession>> = [];
+		ptySessionSpawnMock.mockImplementation((request: MockSpawnRequest) => {
+			const session = createMockPtySession(spawnedSessions.length === 0 ? 111 : 222, request);
+			spawnedSessions.push(session);
+			return session;
+		});
+
+		const manager = new TerminalSessionManager();
+		manager.attach("task-hermes-restart", {
+			onState: vi.fn(),
+			onOutput: vi.fn(),
+			onExit: vi.fn(),
+		});
+
+		await manager.startTaskSession({
+			taskId: "task-hermes-restart",
+			agentId: "hermes",
+			binary: "hermes",
+			args: ["chat"],
+			cwd: "/tmp/task-hermes-restart",
+			prompt: "Fix the bug",
+		});
+
+		spawnedSessions[0]?.triggerExit(130);
+
+		await vi.waitFor(() => {
+			expect(ptySessionSpawnMock).toHaveBeenCalledTimes(2);
+		});
+		expect(prepareAgentLaunchMock).toHaveBeenNthCalledWith(
+			2,
+			expect.objectContaining({
+				taskId: "task-hermes-restart",
+				agentId: "hermes",
+				resumeExistingSession: true,
+			}),
+		);
+	});
+
 	it("sends deferred Codex startup input when the prompt marker appears", async () => {
 		const deferredStartupInput = "\u001b[200~/plan Validate rollout\u001b[201~\r";
 		prepareAgentLaunchMock.mockResolvedValue({
@@ -203,6 +242,8 @@ describe("TerminalSessionManager auto-restart", () => {
 			args: ["chat", "--quiet"],
 			env: {},
 			deferredStartupInput,
+			detectOutputTransition: (data: string, summary: { state: string }) =>
+				summary.state === "running" && data.includes("❯") ? { type: "hook.to_review" as const } : null,
 		});
 
 		const spawnedSessions: Array<ReturnType<typeof createMockPtySession>> = [];
@@ -234,6 +275,10 @@ describe("TerminalSessionManager auto-restart", () => {
 		session.triggerData("\n❯ ");
 		expect(session.write).toHaveBeenCalledWith(deferredStartupInput);
 		expect(session.write).toHaveBeenCalledTimes(1);
+		expect(manager.getSummary("task-hermes-1")?.state).toBe("running");
+
+		session.triggerData("\nOK\n\n❯ ");
+		expect(manager.getSummary("task-hermes-1")?.state).toBe("awaiting_review");
 	});
 
 	it("sends deferred Hermes startup input when the prompt marker is split across chunks", async () => {
