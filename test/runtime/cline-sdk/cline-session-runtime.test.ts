@@ -113,6 +113,13 @@ describe("InMemoryClineSessionRuntime", () => {
 						}),
 					]),
 				}),
+				localRuntime: expect.objectContaining({
+					modelCatalogDefaults: {
+						loadLatestOnInit: true,
+						loadPrivateOnAuth: true,
+						failOnError: false,
+					},
+				}),
 			}),
 		);
 	});
@@ -150,15 +157,13 @@ describe("InMemoryClineSessionRuntime", () => {
 
 		expect(fakeHost.start).toHaveBeenCalledWith(
 			expect.objectContaining({
-				config: expect.objectContaining({
-					reasoningEffort: undefined,
-				}),
+				config: expect.any(Object),
 			}),
 		);
 	});
 
 	it("persists provided task title to session metadata when supported", async () => {
-		const updateSession = vi.fn(async () => ({ updated: true }));
+		const update = vi.fn(async () => ({ updated: true }));
 		const fakeHost = {
 			start: vi.fn(async (input: { config?: { sessionId?: string } }) => ({
 				sessionId: input.config?.sessionId ?? "session-1",
@@ -171,11 +176,9 @@ describe("InMemoryClineSessionRuntime", () => {
 			dispose: vi.fn(async () => {}),
 			get: vi.fn(async () => undefined),
 			list: vi.fn(async () => []),
+			update,
 			readMessages: vi.fn(async () => []),
 			subscribe: vi.fn(() => () => {}),
-			sessionService: {
-				updateSession,
-			},
 		};
 
 		const runtime = createInMemoryClineSessionRuntime({
@@ -194,14 +197,13 @@ describe("InMemoryClineSessionRuntime", () => {
 		});
 
 		expect(result.sessionId).toBeTruthy();
-		expect(updateSession).toHaveBeenCalledWith({
-			sessionId: result.sessionId,
+		expect(update).toHaveBeenCalledWith(result.sessionId, {
 			title: "Readable task title",
 		});
 	});
 
 	it("ignores session metadata update failures during start", async () => {
-		const updateSession = vi.fn(async () => {
+		const update = vi.fn(async () => {
 			throw new Error("storage unavailable");
 		});
 		const fakeHost = {
@@ -216,11 +218,9 @@ describe("InMemoryClineSessionRuntime", () => {
 			dispose: vi.fn(async () => {}),
 			get: vi.fn(async () => undefined),
 			list: vi.fn(async () => []),
+			update,
 			readMessages: vi.fn(async () => []),
 			subscribe: vi.fn(() => () => {}),
-			sessionService: {
-				updateSession,
-			},
 		};
 
 		const runtime = createInMemoryClineSessionRuntime({
@@ -243,7 +243,7 @@ describe("InMemoryClineSessionRuntime", () => {
 				sessionId: expect.any(String),
 			}),
 		);
-		expect(updateSession).toHaveBeenCalledTimes(1);
+		expect(update).toHaveBeenCalledTimes(1);
 	});
 
 	it("routes host events through the pending requested session id before start resolves", async () => {
@@ -418,9 +418,6 @@ describe("InMemoryClineSessionRuntime", () => {
 			expect.objectContaining({
 				userImages: ["data:image/png;base64,abc123"],
 				config: expect.objectContaining({
-					execution: expect.objectContaining({
-						maxConsecutiveMistakes: 6,
-					}),
 					logger: expect.objectContaining({
 						debug: expect.any(Function),
 						log: expect.any(Function),

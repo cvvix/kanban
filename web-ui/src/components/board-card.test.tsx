@@ -595,11 +595,9 @@ describe("BoardCard", () => {
 		expect(container.textContent).toContain("Freshly created task description");
 	});
 
-	it("shows see more for trash card previews without using card click to expand", async () => {
-		mockMeasureWidths = [240, 96];
+	it("renders session activity as single-line truncated text on trash cards", async () => {
 		const preview =
 			"Reviewing the archived implementation details and collecting the final notes for the handoff before cleanup hidden tail";
-		const onCardClick = vi.fn();
 
 		await act(async () => {
 			root.render(
@@ -608,7 +606,6 @@ describe("BoardCard", () => {
 						card={createCard()}
 						index={0}
 						columnId="trash"
-						onClick={onCardClick}
 						sessionSummary={createSummary("awaiting_review", {
 							latestHookActivity: {
 								activityText: null,
@@ -627,36 +624,18 @@ describe("BoardCard", () => {
 
 		const findButton = (label: string) =>
 			Array.from(container.querySelectorAll("button")).find((button) => button.textContent?.trim() === label);
-		const cardElement = container.querySelector('[data-task-id="task-1"]');
 
-		expect(findButton("See more")).toBeDefined();
-		expect(container.textContent).not.toContain("hidden tail");
-
-		await act(async () => {
-			cardElement?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
-		});
-
-		expect(onCardClick).not.toHaveBeenCalled();
-		expect(findButton("See more")).toBeDefined();
-		expect(findButton("Less")).toBeUndefined();
-		expect(container.textContent).not.toContain("hidden tail");
-
-		const seeMoreButton = findButton("See more");
-		await act(async () => {
-			seeMoreButton?.dispatchEvent(new MouseEvent("mousedown", { bubbles: true }));
-			seeMoreButton?.click();
-		});
-
+		// Session activity uses CSS truncation with no See more / Less buttons
 		expect(findButton("See more")).toBeUndefined();
-		expect(findButton("Less")).toBeDefined();
+		expect(findButton("Less")).toBeUndefined();
+
+		// The full text is in the DOM (CSS handles visual truncation)
 		expect(container.textContent).toContain(preview);
 	});
 
-	it("shows see more for active task previews without using card click to expand", async () => {
-		mockMeasureWidths = [240, 96];
+	it("renders session activity as single-line truncated text for running tasks", async () => {
 		const preview =
 			"Reviewing the archived implementation details and collecting the final notes for the handoff before cleanup hidden tail";
-		const onCardClick = vi.fn();
 
 		await act(async () => {
 			root.render(
@@ -664,7 +643,6 @@ describe("BoardCard", () => {
 					card={createCard()}
 					index={0}
 					columnId="in_progress"
-					onClick={onCardClick}
 					sessionSummary={createSummary("running", {
 						latestHookActivity: {
 							activityText: null,
@@ -682,29 +660,12 @@ describe("BoardCard", () => {
 
 		const findButton = (label: string) =>
 			Array.from(container.querySelectorAll("button")).find((button) => button.textContent?.trim() === label);
-		const cardElement = container.querySelector('[data-task-id="task-1"]');
 
-		expect(findButton("See more")).toBeDefined();
-		expect(container.textContent).not.toContain("hidden tail");
-
-		await act(async () => {
-			cardElement?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
-		});
-
-		expect(onCardClick).toHaveBeenCalledTimes(1);
-		expect(findButton("See more")).toBeDefined();
-		expect(findButton("Less")).toBeUndefined();
-		expect(container.textContent).not.toContain("hidden tail");
-
-		const seeMoreButton = findButton("See more");
-		await act(async () => {
-			seeMoreButton?.dispatchEvent(new MouseEvent("mousedown", { bubbles: true }));
-			seeMoreButton?.click();
-		});
-
-		expect(onCardClick).toHaveBeenCalledTimes(1);
+		// Session activity uses CSS truncation with no See more / Less buttons
 		expect(findButton("See more")).toBeUndefined();
-		expect(findButton("Less")).toBeDefined();
+		expect(findButton("Less")).toBeUndefined();
+
+		// The full text is in the DOM (CSS handles visual truncation)
 		expect(container.textContent).toContain(preview);
 	});
 

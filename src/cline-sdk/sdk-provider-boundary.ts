@@ -4,7 +4,7 @@
 
 import { readFile, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
-import * as ClineCore from "@clinebot/core/node";
+import * as ClineCore from "@clinebot/core";
 import {
 	addLocalProvider,
 	type ClineAccountBalance,
@@ -30,15 +30,15 @@ import {
 	loginOcaOAuth,
 	loginOpenAICodex,
 	type OcaOAuthProviderOptions,
+	type ProviderSettings,
 	ProviderSettingsManager,
 	completeClineDeviceAuth as sdkCompleteClineDeviceAuth,
 	startClineDeviceAuth as sdkStartClineDeviceAuth,
 	type Tool,
-} from "@clinebot/core/node";
-import type * as Llms from "@clinebot/llms";
+} from "@clinebot/core";
 
 export type ManagedClineOauthProviderId = "cline" | "oca" | "openai-codex";
-export type SdkReasoningEffort = NonNullable<NonNullable<Llms.ProviderSettings["reasoning"]>["effort"]>;
+export type SdkReasoningEffort = NonNullable<NonNullable<ProviderSettings["reasoning"]>["effort"]>;
 export const SDK_DEFAULT_PROVIDER_ID = "cline";
 export const SDK_DEFAULT_MODEL_ID = "anthropic/claude-sonnet-4.6";
 
@@ -78,7 +78,7 @@ export interface SdkUserRemoteConfigResponse {
 	enabled: boolean;
 }
 
-export type SdkProviderSettings = Llms.ProviderSettings;
+export type SdkProviderSettings = ProviderSettings;
 export type SdkCustomProviderCapability = "streaming" | "tools" | "reasoning" | "vision" | "prompt-cache";
 
 export interface SaveSdkProviderSettingsInput {
@@ -311,7 +311,7 @@ export async function listSdkProviderCatalog(): Promise<SdkProviderCatalogItem[]
 export async function listSdkProviderModels(providerId: string): Promise<SdkProviderModel[]> {
 	const config = providerManager.getProviderConfig(providerId);
 	const response = await getLocalProviderModels(providerId, config);
-	return response.models.map((model) => ({
+	return response.models.map((model: Awaited<typeof response>["models"][number]) => ({
 		id: model.id,
 		name: model.name,
 		supportsVision: model.supportsVision,
