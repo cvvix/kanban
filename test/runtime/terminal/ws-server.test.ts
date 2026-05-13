@@ -347,6 +347,48 @@ describe("createTerminalWebSocketBridge – passcode gate", () => {
 			});
 		}
 	});
+
+	it("delegates stale session handling to the access recovery callback when configured", async () => {
+		const freshServer = createServer((_request, response) => {
+			response.writeHead(404);
+			response.end();
+		});
+		const freshManager = new FakeTerminalManager();
+		const recoverTaskSessionOnAccess = vi.fn(async () => {});
+		const freshBridge = createTerminalWebSocketBridge({
+			server: freshServer,
+			resolveTerminalManager: (workspaceId) => (workspaceId === WORKSPACE_ID ? freshManager : null),
+			isTerminalIoWebSocketPath: (pathname) => pathname === "/api/terminal/io",
+			isTerminalControlWebSocketPath: (pathname) => pathname === "/api/terminal/control",
+			recoverTaskSessionOnAccess,
+		});
+		freshServer.listen(0, "127.0.0.1");
+		await once(freshServer, "listening");
+		const freshAddress = freshServer.address() as AddressInfo | null;
+		if (!freshAddress) {
+			throw new Error("Expected fresh server address.");
+		}
+		setKanbanRuntimePort(freshAddress.port);
+		const freshUrl = `ws://127.0.0.1:${freshAddress.port}/api/terminal/control?taskId=${TASK_ID}&workspaceId=${WORKSPACE_ID}`;
+		const socket = await openQueuedWebSocket(freshUrl);
+
+		try {
+			await waitForAssertion(() => {
+				expect(recoverTaskSessionOnAccess).toHaveBeenCalledWith({
+					taskId: TASK_ID,
+					workspaceId: WORKSPACE_ID,
+					terminalManager: freshManager,
+				});
+			});
+			expect(freshManager.recoverStaleSession).not.toHaveBeenCalled();
+		} finally {
+			await closeSocket(socket.socket);
+			await freshBridge.close();
+			await new Promise<void>((resolve, reject) => {
+				freshServer.close((error) => (error ? reject(error) : resolve()));
+			});
+		}
+	});
 });
 
 describe("createTerminalWebSocketBridge", () => {

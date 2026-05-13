@@ -20,6 +20,7 @@ import type {
 	RuntimeStateStreamWorkspaceStateMessage,
 	RuntimeTaskSessionSummary,
 } from "../core/api-contract";
+import { syncWorkspaceSessionRecoveryFromSummary } from "../state/workspace-state";
 import type { TerminalSessionManager } from "../terminal/session-manager";
 import { createWorkspaceMetadataMonitor } from "./workspace-metadata-monitor";
 import type { ResolvedWorkspaceStreamTarget, WorkspaceRegistry } from "./workspace-registry";
@@ -498,6 +499,7 @@ export function createRuntimeStateHub(deps: CreateRuntimeStateHubDependencies): 
 				return;
 			}
 			const unsubscribe = manager.onSummary((summary) => {
+				void syncWorkspaceSessionRecoveryFromSummary(workspaceId, summary).catch(() => {});
 				queueTaskSessionSummaryBroadcast(workspaceId, summary);
 			});
 			terminalSummaryUnsubscribeByWorkspaceId.set(workspaceId, unsubscribe);

@@ -13,6 +13,8 @@ import {
 	type RuntimeWorkspaceStateResponse,
 	type RuntimeWorkspaceStateSaveRequest,
 	runtimeBoardDataSchema,
+	runtimeTaskSessionReviewReasonSchema,
+	runtimeTaskSessionStateSchema,
 	runtimeTaskSessionSummarySchema,
 	runtimeWorkspaceStateSaveRequestSchema,
 } from "../core/api-contract";
@@ -27,6 +29,7 @@ const WORKSPACES_DIR = "workspaces";
 const INDEX_FILENAME = "index.json";
 const BOARD_FILENAME = "board.json";
 const SESSIONS_FILENAME = "sessions.json";
+const SESSION_RECOVERY_FILENAME = "session-recovery.json";
 const META_FILENAME = "meta.json";
 const INDEX_VERSION = 1;
 const WORKSPACE_ID_COLLISION_SUFFIX_LENGTH = 4;
@@ -59,8 +62,33 @@ interface WorkspaceStateMeta {
 	updatedAt: number;
 }
 
+const recoverableAgentIdSchema = z.enum(["claude", "codex", "hermes"]);
+export type RuntimeRecoverableAgentId = z.infer<typeof recoverableAgentIdSchema>;
+
+export interface RuntimeTaskSessionRecoveryRecord {
+	taskId: string;
+	agentId: RuntimeRecoverableAgentId;
+	agentSessionId: string;
+	workspacePath: string | null;
+	lastKnownState: RuntimeTaskSessionSummary["state"];
+	reviewReason: RuntimeTaskSessionSummary["reviewReason"];
+	startedAt: number | null;
+	updatedAt: number;
+}
+
 const workspaceStateMetaSchema = z.object({
 	revision: z.number().int().nonnegative(),
+	updatedAt: z.number(),
+});
+
+const runtimeTaskSessionRecoveryRecordSchema = z.object({
+	taskId: z.string().min(1),
+	agentId: recoverableAgentIdSchema,
+	agentSessionId: z.string().min(1),
+	workspacePath: z.string().nullable(),
+	lastKnownState: runtimeTaskSessionStateSchema,
+	reviewReason: runtimeTaskSessionReviewReasonSchema,
+	startedAt: z.number().nullable(),
 	updatedAt: z.number(),
 });
 
@@ -128,6 +156,20 @@ const workspaceSessionsSchema = z
 		}
 	});
 
+const workspaceSessionRecoverySchema = z
+	.record(z.string(), runtimeTaskSessionRecoveryRecordSchema)
+	.superRefine((records, context) => {
+		for (const [taskId, record] of Object.entries(records)) {
+			if (record.taskId !== taskId) {
+				context.addIssue({
+					code: z.ZodIssueCode.custom,
+					path: [taskId, "taskId"],
+					message: `Recovery record taskId must match record key "${taskId}".`,
+				});
+			}
+		}
+	});
+
 export interface RuntimeWorkspaceContext {
 	repoPath: string;
 	workspaceId: string;
@@ -147,6 +189,47 @@ function createEmptyBoard(): RuntimeBoardData {
 			cards: [],
 		})),
 		dependencies: [],
+	};
+}
+
+function toRecoverableAgentId(agentId: RuntimeTaskSessionSummary["agentId"]): RuntimeRecoverableAgentId | null {
+	switch (agentId) {
+		case "claude":
+		case "codex":
+		case "hermes":
+			return agentId;
+		default:
+			return null;
+	}
+}
+
+function shouldRecoverSummary(summary: RuntimeTaskSessionSummary): boolean {
+	if (summary.state === "running") {
+		return true;
+	}
+	return (
+		summary.state === "awaiting_review" &&
+		(summary.reviewReason === "hook" || summary.reviewReason === "attention" || summary.reviewReason === "error")
+	);
+}
+
+export function createWorkspaceSessionRecoveryRecord(
+	summary: RuntimeTaskSessionSummary,
+): RuntimeTaskSessionRecoveryRecord | null {
+	const agentId = toRecoverableAgentId(summary.agentId);
+	const agentSessionId = summary.agentSessionId?.trim();
+	if (!agentId || !agentSessionId || !shouldRecoverSummary(summary)) {
+		return null;
+	}
+	return {
+		taskId: summary.taskId,
+		agentId,
+		agentSessionId,
+		workspacePath: summary.workspacePath,
+		lastKnownState: summary.state,
+		reviewReason: summary.reviewReason,
+		startedAt: summary.startedAt,
+		updatedAt: summary.updatedAt,
 	};
 }
 
@@ -184,6 +267,10 @@ function getWorkspaceBoardPath(workspaceId: string): string {
 
 function getWorkspaceSessionsPath(workspaceId: string): string {
 	return join(getWorkspaceDirectoryPath(workspaceId), SESSIONS_FILENAME);
+}
+
+function getWorkspaceSessionRecoveryPath(workspaceId: string): string {
+	return join(getWorkspaceDirectoryPath(workspaceId), SESSION_RECOVERY_FILENAME);
 }
 
 function getWorkspaceMetaPath(workspaceId: string): string {
@@ -308,6 +395,46 @@ async function readWorkspaceSessions(workspaceId: string): Promise<Record<string
 	const sessionsPath = getWorkspaceSessionsPath(workspaceId);
 	const rawSessions = await readJsonFile(sessionsPath);
 	return parsePersistedStateFile(sessionsPath, SESSIONS_FILENAME, rawSessions, workspaceSessionsSchema, {});
+}
+
+async function readWorkspaceSessionRecovery(
+	workspaceId: string,
+): Promise<Record<string, RuntimeTaskSessionRecoveryRecord>> {
+	const recoveryPath = getWorkspaceSessionRecoveryPath(workspaceId);
+	const rawRecovery = await readJsonFile(recoveryPath);
+	return parsePersistedStateFile(
+		recoveryPath,
+		SESSION_RECOVERY_FILENAME,
+		rawRecovery,
+		workspaceSessionRecoverySchema,
+		{},
+	);
+}
+
+export async function loadWorkspaceSessionRecoveryRecord(
+	workspaceId: string,
+	taskId: string,
+): Promise<RuntimeTaskSessionRecoveryRecord | null> {
+	const records = await readWorkspaceSessionRecovery(workspaceId);
+	return records[taskId] ?? null;
+}
+
+export async function syncWorkspaceSessionRecoveryFromSummary(
+	workspaceId: string,
+	summary: RuntimeTaskSessionSummary,
+): Promise<void> {
+	await lockedFileSystem.withLock(getWorkspaceDirectoryLockRequest(workspaceId), async () => {
+		const records = await readWorkspaceSessionRecovery(workspaceId);
+		const record = createWorkspaceSessionRecoveryRecord(summary);
+		if (record) {
+			records[summary.taskId] = record;
+		} else {
+			delete records[summary.taskId];
+		}
+		await lockedFileSystem.writeJsonFileAtomic(getWorkspaceSessionRecoveryPath(workspaceId), records, {
+			lock: null,
+		});
+	});
 }
 
 async function readWorkspaceMeta(workspaceId: string): Promise<WorkspaceStateMeta> {

@@ -11,6 +11,8 @@ import {
 } from "../cline-sdk/cline-task-session-service";
 import { createClineWatcherRegistry } from "../cline-sdk/cline-watcher-registry";
 import type {
+	RuntimeBoardCard,
+	RuntimeBoardColumnId,
 	RuntimeCommandRunResponse,
 	RuntimeRunUpdateResponse,
 	RuntimeUpdateStatusResponse,
@@ -36,7 +38,12 @@ import {
 	validatePasscode,
 	validateSession,
 } from "../security/passcode-manager";
-import { loadWorkspaceContextById } from "../state/workspace-state";
+import {
+	loadWorkspaceContextById,
+	loadWorkspaceSessionRecoveryRecord,
+	loadWorkspaceState,
+} from "../state/workspace-state";
+import { resolveAgentCommand } from "../terminal/agent-registry";
 import type { TerminalSessionManager } from "../terminal/session-manager";
 import { createTerminalWebSocketBridge } from "../terminal/ws-server";
 import { type RuntimeTrpcContext, type RuntimeTrpcWorkspaceScope, runtimeAppRouter } from "../trpc/app-router";
@@ -44,6 +51,7 @@ import { createHooksApi } from "../trpc/hooks-api";
 import { createProjectsApi } from "../trpc/projects-api";
 import { createRuntimeApi } from "../trpc/runtime-api";
 import { createWorkspaceApi } from "../trpc/workspace-api";
+import { resolveTaskCwd } from "../workspace/task-worktree";
 import { getWebUiDir, normalizeRequestPath, readAsset } from "./assets";
 import { handleHttpRequest, handleSocketUpgrade } from "./middleware";
 import type { RuntimeStateHub } from "./runtime-state-hub";
@@ -100,6 +108,22 @@ function readWorkspaceIdFromRequest(request: IncomingMessage, requestUrl: URL): 
 	return null;
 }
 
+function findTaskCardInBoard(
+	board: RuntimeWorkspaceStateResponse["board"],
+	taskId: string,
+): { card: RuntimeBoardCard; columnId: RuntimeBoardColumnId } | null {
+	for (const column of board.columns) {
+		const card = column.cards.find((candidate) => candidate.id === taskId);
+		if (card) {
+			return {
+				card,
+				columnId: column.id,
+			};
+		}
+	}
+	return null;
+}
+
 export async function createRuntimeServer(deps: CreateRuntimeServerDependencies): Promise<RuntimeServer> {
 	const webUiDir = getWebUiDir();
 
@@ -141,6 +165,73 @@ export async function createRuntimeServer(deps: CreateRuntimeServerDependencies)
 
 	const getScopedTerminalManager = async (scope: RuntimeTrpcWorkspaceScope): Promise<TerminalSessionManager> =>
 		await deps.ensureTerminalManagerForWorkspace(scope.workspaceId, scope.workspacePath);
+	const terminalTaskRecoveryPromises = new Map<string, Promise<void>>();
+	const recoverTerminalTaskSessionOnAccess = async (workspaceId: string, taskId: string): Promise<void> => {
+		const recoveryKey = `${workspaceId}:${taskId}`;
+		const existingRecovery = terminalTaskRecoveryPromises.get(recoveryKey);
+		if (existingRecovery) {
+			await existingRecovery;
+			return;
+		}
+		const recovery = (async () => {
+			const workspaceContext = await loadWorkspaceContextById(workspaceId);
+			if (!workspaceContext) {
+				return;
+			}
+			const workspaceScope: RuntimeTrpcWorkspaceScope = {
+				workspaceId: workspaceContext.workspaceId,
+				workspacePath: workspaceContext.repoPath,
+			};
+			const terminalManager = await getScopedTerminalManager(workspaceScope);
+			if (terminalManager.hasActiveSession(taskId)) {
+				return;
+			}
+			const recoveryRecord = await loadWorkspaceSessionRecoveryRecord(workspaceId, taskId);
+			if (!recoveryRecord) {
+				terminalManager.recoverStaleSession(taskId);
+				return;
+			}
+			const workspaceState = await loadWorkspaceState(workspaceContext.repoPath);
+			const taskLocation = findTaskCardInBoard(workspaceState.board, taskId);
+			if (!taskLocation || (taskLocation.columnId !== "in_progress" && taskLocation.columnId !== "review")) {
+				terminalManager.recoverStaleSession(taskId);
+				return;
+			}
+			const scopedRuntimeConfig = await deps.workspaceRegistry.loadScopedRuntimeConfig(workspaceScope);
+			const resolved = resolveAgentCommand({
+				...scopedRuntimeConfig,
+				selectedAgentId: recoveryRecord.agentId,
+			});
+			if (!resolved) {
+				terminalManager.recoverStaleSession(taskId);
+				return;
+			}
+			const taskCwd = await resolveTaskCwd({
+				cwd: workspaceContext.repoPath,
+				taskId,
+				baseRef: taskLocation.card.baseRef,
+				ensure: true,
+			});
+			await terminalManager.startTaskSession({
+				taskId,
+				agentId: resolved.agentId,
+				binary: resolved.binary,
+				args: resolved.args,
+				autonomousModeEnabled: scopedRuntimeConfig.agentAutonomousModeEnabled,
+				cwd: taskCwd,
+				prompt: taskLocation.card.prompt,
+				startInPlanMode: taskLocation.card.startInPlanMode,
+				resumeExistingSession: true,
+				resumeToReview: true,
+				agentSessionId: recoveryRecord.agentSessionId,
+				workspaceId,
+			});
+		})().finally(() => {
+			terminalTaskRecoveryPromises.delete(recoveryKey);
+		});
+		terminalTaskRecoveryPromises.set(recoveryKey, recovery);
+		await recovery;
+	};
 	const clineTaskSessionServiceByWorkspaceId = new Map<string, ClineTaskSessionService>();
 	const clineWatcherRegistry = createClineWatcherRegistry();
 	const getScopedClineTaskSessionService = async (
@@ -460,6 +551,9 @@ export async function createRuntimeServer(deps: CreateRuntimeServerDependencies)
 		resolveTerminalManager: (workspaceId) => deps.workspaceRegistry.getTerminalManagerForWorkspace(workspaceId),
 		isTerminalIoWebSocketPath: (pathname) => normalizeRequestPath(pathname) === "/api/terminal/io",
 		isTerminalControlWebSocketPath: (pathname) => normalizeRequestPath(pathname) === "/api/terminal/control",
+		recoverTaskSessionOnAccess: async ({ workspaceId, taskId }) => {
+			await recoverTerminalTaskSessionOnAccess(workspaceId, taskId);
+		},
 		validateUpgradeSession:
 			isRemoteMode && isPasscodeEnabled()
 				? (cookieHeader) => {

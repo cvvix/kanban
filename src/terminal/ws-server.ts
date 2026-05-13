@@ -21,11 +21,18 @@ interface UpgradeRequest extends IncomingMessage {
 	__kanbanUpgradeHandled?: boolean;
 }
 
+export type TerminalTaskAccessRecovery = (context: {
+	taskId: string;
+	workspaceId: string;
+	terminalManager: TerminalSessionService;
+}) => Promise<void> | void;
+
 export interface CreateTerminalWebSocketBridgeRequest {
 	server: Server;
 	resolveTerminalManager: (workspaceId: string) => TerminalSessionService | null;
 	isTerminalIoWebSocketPath: (pathname: string) => boolean;
 	isTerminalControlWebSocketPath: (pathname: string) => boolean;
+	recoverTaskSessionOnAccess?: TerminalTaskAccessRecovery;
 	/**
 	 * Optional session validator for remote-mode passcode enforcement.
 	 * When provided, WebSocket upgrade requests that fail validation are
@@ -130,6 +137,7 @@ export function createTerminalWebSocketBridge({
 	resolveTerminalManager,
 	isTerminalIoWebSocketPath,
 	isTerminalControlWebSocketPath,
+	recoverTaskSessionOnAccess,
 	validateUpgradeSession,
 }: CreateTerminalWebSocketBridgeRequest): TerminalWebSocketBridge {
 	const activeSockets = new Set<Socket>();
@@ -144,6 +152,16 @@ export function createTerminalWebSocketBridge({
 
 	const ioServer = new WebSocketServer({ noServer: true });
 	const controlServer = new WebSocketServer({ noServer: true });
+
+	const recoverTaskAccess = (taskId: string, workspaceId: string, terminalManager: TerminalSessionService): void => {
+		if (!recoverTaskSessionOnAccess) {
+			terminalManager.recoverStaleSession(taskId);
+			return;
+		}
+		void Promise.resolve(recoverTaskSessionOnAccess({ taskId, workspaceId, terminalManager })).catch(() => {
+			terminalManager.recoverStaleSession(taskId);
+		});
+	};
 
 	const getOrCreateTerminalStreamState = (connectionKey: string): TerminalStreamState => {
 		const existing = terminalStreamStates.get(connectionKey);
@@ -426,7 +444,7 @@ export function createTerminalWebSocketBridge({
 		const clientId = (context as TerminalWebSocketConnectionContext).clientId;
 		const terminalManager = (context as TerminalWebSocketConnectionContext).terminalManager;
 		const connectionKey = buildConnectionKey(workspaceId, taskId);
-		terminalManager.recoverStaleSession(taskId);
+		recoverTaskAccess(taskId, workspaceId, terminalManager);
 		const streamState = getOrCreateTerminalStreamState(connectionKey);
 		const viewerState = getOrCreateViewerState(streamState, clientId);
 		const previousIoSocket = viewerState.ioSocket;
@@ -468,7 +486,7 @@ export function createTerminalWebSocketBridge({
 		const clientId = (context as TerminalWebSocketConnectionContext).clientId;
 		const terminalManager = (context as TerminalWebSocketConnectionContext).terminalManager;
 		const connectionKey = buildConnectionKey(workspaceId, taskId);
-		terminalManager.recoverStaleSession(taskId);
+		recoverTaskAccess(taskId, workspaceId, terminalManager);
 		const streamState = getOrCreateTerminalStreamState(connectionKey);
 		const viewerState = getOrCreateViewerState(streamState, clientId);
 		const previousControlSocket = viewerState.controlSocket;

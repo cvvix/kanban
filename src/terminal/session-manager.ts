@@ -97,6 +97,7 @@ export interface StartTaskSessionRequest {
 	startInPlanMode?: boolean;
 	resumeFromTrash?: boolean;
 	resumeExistingSession?: boolean;
+	resumeToReview?: boolean;
 	agentSessionId?: string | null;
 	cols?: number;
 	rows?: number;
@@ -433,6 +434,10 @@ export class TerminalSessionManager implements TerminalSessionService {
 		return Array.from(this.entries.values()).map((entry) => cloneSummary(entry.summary));
 	}
 
+	hasActiveSession(taskId: string): boolean {
+		return Boolean(this.entries.get(taskId)?.active);
+	}
+
 	attach(taskId: string, listener: TerminalSessionListener): (() => void) | null {
 		const entry = this.ensureEntry(taskId);
 
@@ -742,15 +747,16 @@ export class TerminalSessionManager implements TerminalSessionService {
 		entry.terminalStateMirror = terminalStateMirror;
 
 		const startedAt = now();
+		const shouldStartAwaitingReview = request.resumeFromTrash === true || request.resumeToReview === true;
 		updateSummary(entry, {
-			state: request.resumeFromTrash ? "awaiting_review" : "running",
+			state: shouldStartAwaitingReview ? "awaiting_review" : "running",
 			agentId: request.agentId,
 			agentSessionId: launchAgentSessionId ?? entry.summary.agentSessionId ?? null,
 			workspacePath: request.cwd,
 			pid: session.pid,
 			startedAt,
 			lastOutputAt: null,
-			reviewReason: request.resumeFromTrash ? "attention" : null,
+			reviewReason: shouldStartAwaitingReview ? "attention" : null,
 			exitCode: null,
 			lastHookAt: null,
 			latestHookActivity: null,

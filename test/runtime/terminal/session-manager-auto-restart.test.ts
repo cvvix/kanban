@@ -52,6 +52,27 @@ describe("TerminalSessionManager auto-restart", () => {
 		}));
 	});
 
+	it("can restore a resumed task directly into review", async () => {
+		ptySessionSpawnMock.mockImplementation((request: MockSpawnRequest) => createMockPtySession(111, request));
+
+		const manager = new TerminalSessionManager();
+		const summary = await manager.startTaskSession({
+			taskId: "task-crash-restore",
+			agentId: "codex",
+			binary: "codex",
+			args: [],
+			cwd: "/tmp/task-crash-restore",
+			prompt: "Resume the interrupted task",
+			resumeExistingSession: true,
+			resumeToReview: true,
+			agentSessionId: "codex-session-restore",
+		});
+
+		expect(summary.state).toBe("awaiting_review");
+		expect(summary.reviewReason).toBe("attention");
+		expect(summary.agentSessionId).toBe("codex-session-restore");
+	});
+
 	it("restarts an attached agent session after it exits", async () => {
 		const spawnedSessions: Array<ReturnType<typeof createMockPtySession>> = [];
 		ptySessionSpawnMock.mockImplementation((request: MockSpawnRequest) => {
