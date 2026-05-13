@@ -6,7 +6,7 @@ import type {
 	RuntimeClineProviderSettings,
 	RuntimeConfigResponse,
 } from "../core/api-contract";
-import { isBinaryAvailableOnPath } from "./command-discovery";
+import { isNodeModulesBinPath, resolveBinaryOnPath } from "./command-discovery";
 
 export interface ResolvedAgentCommand {
 	agentId: RuntimeAgentId;
@@ -48,13 +48,25 @@ function isRuntimeDebugModeEnabled(): boolean {
 	return parseBooleanEnvValue(debugModeValue);
 }
 
+function resolveAgentBinary(agentId: RuntimeAgentId, binary: string): string | null {
+	return resolveBinaryOnPath(binary, {
+		skipPathEntry: agentId === "codex" ? isNodeModulesBinPath : undefined,
+	});
+}
+
 export function detectInstalledCommands(): string[] {
-	const candidates = [...RUNTIME_AGENT_CATALOG.map((entry) => entry.binary), "npx"];
+	const candidates = [...RUNTIME_AGENT_CATALOG.map((entry) => ({ agentId: entry.id, binary: entry.binary })), null];
 	const detected: string[] = [];
 
 	for (const candidate of candidates) {
-		if (isBinaryAvailableOnPath(candidate)) {
-			detected.push(candidate);
+		if (candidate === null) {
+			if (resolveBinaryOnPath("npx")) {
+				detected.push("npx");
+			}
+			continue;
+		}
+		if (resolveAgentBinary(candidate.agentId, candidate.binary)) {
+			detected.push(candidate.binary);
 		}
 	}
 
@@ -86,12 +98,13 @@ export function resolveAgentCommand(runtimeConfig: RuntimeConfigState): Resolved
 	}
 	const defaultArgs = getDefaultArgs(selected.id);
 	const command = joinCommand(selected.binary, defaultArgs);
-	if (isBinaryAvailableOnPath(selected.binary)) {
+	const resolvedBinary = resolveAgentBinary(selected.id, selected.binary);
+	if (resolvedBinary) {
 		return {
 			agentId: selected.id,
 			label: selected.label,
 			command,
-			binary: selected.binary,
+			binary: resolvedBinary,
 			args: defaultArgs,
 		};
 	}
@@ -105,7 +118,7 @@ export function buildRuntimeConfigResponse(
 	const detectedCommands = detectInstalledCommands();
 	const agents = getCuratedDefinitions(runtimeConfig, detectedCommands);
 	const resolved = resolveAgentCommand(runtimeConfig);
-	const effectiveCommand = resolved ? joinCommand(resolved.binary, resolved.args) : null;
+	const effectiveCommand = resolved?.command ?? null;
 
 	return {
 		selectedAgentId: runtimeConfig.selectedAgentId,

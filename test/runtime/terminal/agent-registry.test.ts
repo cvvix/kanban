@@ -1,11 +1,15 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const commandDiscoveryMocks = vi.hoisted(() => ({
-	isBinaryAvailableOnPath: vi.fn(),
+	resolveBinaryOnPath: vi.fn(),
 }));
 
 vi.mock("../../../src/terminal/command-discovery.js", () => ({
-	isBinaryAvailableOnPath: commandDiscoveryMocks.isBinaryAvailableOnPath,
+	isNodeModulesBinPath: (entry: string) => {
+		const parts = entry.split(/[\\/]+/).filter(Boolean);
+		return parts.length >= 2 && parts.at(-2) === "node_modules" && parts.at(-1) === ".bin";
+	},
+	resolveBinaryOnPath: commandDiscoveryMocks.resolveBinaryOnPath,
 }));
 
 import type { RuntimeConfigState } from "../../../src/config/runtime-config";
@@ -33,8 +37,8 @@ function createRuntimeConfigState(overrides: Partial<RuntimeConfigState> = {}): 
 }
 
 beforeEach(() => {
-	commandDiscoveryMocks.isBinaryAvailableOnPath.mockReset();
-	commandDiscoveryMocks.isBinaryAvailableOnPath.mockReturnValue(false);
+	commandDiscoveryMocks.resolveBinaryOnPath.mockReset();
+	commandDiscoveryMocks.resolveBinaryOnPath.mockReturnValue(null);
 	delete process.env.KANBAN_DEBUG_MODE;
 	delete process.env.DEBUG_MODE;
 	delete process.env.debug_mode;
@@ -42,20 +46,61 @@ beforeEach(() => {
 
 describe("agent-registry", () => {
 	it("detects installed commands from the inherited PATH", () => {
-		commandDiscoveryMocks.isBinaryAvailableOnPath.mockImplementation((binary: string) => binary === "claude");
+		commandDiscoveryMocks.resolveBinaryOnPath.mockImplementation((binary: string) =>
+			binary === "claude" ? "/usr/local/bin/claude" : null,
+		);
 
 		const detected = detectInstalledCommands();
 
 		expect(detected).toEqual(["claude"]);
-		expect(commandDiscoveryMocks.isBinaryAvailableOnPath).toHaveBeenCalledTimes(9);
+		expect(commandDiscoveryMocks.resolveBinaryOnPath).toHaveBeenCalledTimes(9);
 	});
 
 	it("treats shell-only agents as unavailable", () => {
-		commandDiscoveryMocks.isBinaryAvailableOnPath.mockImplementation((binary: string) => binary === "npx");
+		commandDiscoveryMocks.resolveBinaryOnPath.mockImplementation((binary: string) =>
+			binary === "npx" ? "/usr/local/bin/npx" : null,
+		);
 
 		const resolved = resolveAgentCommand(createRuntimeConfigState({ selectedAgentId: "claude" }));
 
 		expect(resolved).toBeNull();
+	});
+
+	it("resolves codex to the system binary instead of project node_modules", () => {
+		commandDiscoveryMocks.resolveBinaryOnPath.mockImplementation(
+			(binary: string, options?: { skipPathEntry?: (entry: string) => boolean }) => {
+				if (binary !== "codex") {
+					return null;
+				}
+				if (!options?.skipPathEntry?.("/repo/node_modules/.bin")) {
+					return "/repo/node_modules/.bin/codex";
+				}
+				return "/usr/local/bin/codex";
+			},
+		);
+
+		const resolved = resolveAgentCommand(createRuntimeConfigState({ selectedAgentId: "codex" }));
+
+		expect(resolved).toEqual(
+			expect.objectContaining({
+				agentId: "codex",
+				command: "codex",
+				binary: "/usr/local/bin/codex",
+			}),
+		);
+	});
+
+	it("does not detect codex when only the project node_modules binary is available", () => {
+		commandDiscoveryMocks.resolveBinaryOnPath.mockImplementation(
+			(binary: string, options?: { skipPathEntry?: (entry: string) => boolean }) => {
+				if (binary !== "codex") {
+					return null;
+				}
+				return options?.skipPathEntry?.("/repo/node_modules/.bin") ? null : "/repo/node_modules/.bin/codex";
+			},
+		);
+
+		expect(detectInstalledCommands()).not.toContain("codex");
 	});
 });
 
@@ -92,7 +137,9 @@ describe("buildRuntimeConfigResponse", () => {
 		const config = createRuntimeConfigState({
 			agentAutonomousModeEnabled: false,
 		});
-		commandDiscoveryMocks.isBinaryAvailableOnPath.mockImplementation((binary: string) => binary === "claude");
+		commandDiscoveryMocks.resolveBinaryOnPath.mockImplementation((binary: string) =>
+			binary === "claude" ? "/usr/local/bin/claude" : null,
+		);
 
 		const response = buildRuntimeConfigResponse(config, {
 			providerId: null,

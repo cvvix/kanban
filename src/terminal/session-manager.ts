@@ -22,6 +22,7 @@ import {
 	WORKSPACE_TRUST_CONFIRM_DELAY_MS,
 } from "./claude-workspace-trust";
 import { hasCodexWorkspaceTrustPrompt, shouldAutoConfirmCodexWorkspaceTrust } from "./codex-workspace-trust";
+import { removeNodeModulesBinPathEntries } from "./command-discovery";
 import { stripAnsi } from "./output-utils";
 import { PtySession } from "./pty-session";
 import { reduceSessionTransition, type SessionTransitionEvent } from "./session-state-machine";
@@ -186,13 +187,20 @@ function formatShellSpawnFailure(binary: string, error: unknown): string {
 function buildTerminalEnvironment(
 	...sources: Array<Record<string, string | undefined> | undefined>
 ): Record<string, string | undefined> {
-	return {
+	const env = {
 		...process.env,
 		...Object.assign({}, ...sources),
 		COLORTERM: "truecolor",
 		TERM: "xterm-256color",
 		TERM_PROGRAM: "kanban",
 	};
+	const pathKey =
+		process.platform === "win32" ? (Object.keys(env).find((key) => key.toLowerCase() === "path") ?? "Path") : "PATH";
+	const sanitizedPath = removeNodeModulesBinPathEntries(env[pathKey]);
+	if (sanitizedPath !== undefined) {
+		env[pathKey] = sanitizedPath;
+	}
+	return env;
 }
 
 function hasCodexInteractivePrompt(text: string): boolean {
