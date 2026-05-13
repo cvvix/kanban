@@ -291,6 +291,59 @@ describe("TerminalSessionManager auto-restart", () => {
 		);
 	});
 
+	it("captures Codex session ids from session_meta split across output chunks", async () => {
+		const spawnedSessions: Array<ReturnType<typeof createMockPtySession>> = [];
+		ptySessionSpawnMock.mockImplementation((request: MockSpawnRequest) => {
+			const session = createMockPtySession(spawnedSessions.length === 0 ? 111 : 222, request);
+			spawnedSessions.push(session);
+			return session;
+		});
+
+		const manager = new TerminalSessionManager();
+		manager.attach("task-codex-split-restart", {
+			onState: vi.fn(),
+			onOutput: vi.fn(),
+			onExit: vi.fn(),
+		});
+
+		await manager.startTaskSession({
+			taskId: "task-codex-split-restart",
+			agentId: "codex",
+			binary: "codex",
+			args: [],
+			cwd: "/tmp/task-codex-split-restart",
+			prompt: "Promote the split release",
+		});
+
+		const line = JSON.stringify({
+			type: "session_meta",
+			payload: { id: "55555555-5555-4555-8555-555555555555", cwd: "/tmp/task-codex-split-restart" },
+		});
+		const splitIndex = line.indexOf("payload");
+		spawnedSessions[0]?.triggerData(line.slice(0, splitIndex));
+		expect(manager.getSummary("task-codex-split-restart")?.agentSessionId).toBeNull();
+
+		spawnedSessions[0]?.triggerData(`${line.slice(splitIndex)}\n`);
+		expect(manager.getSummary("task-codex-split-restart")?.agentSessionId).toBe(
+			"55555555-5555-4555-8555-555555555555",
+		);
+
+		spawnedSessions[0]?.triggerExit(130);
+
+		await vi.waitFor(() => {
+			expect(ptySessionSpawnMock).toHaveBeenCalledTimes(2);
+		});
+		expect(prepareAgentLaunchMock).toHaveBeenNthCalledWith(
+			2,
+			expect.objectContaining({
+				taskId: "task-codex-split-restart",
+				agentId: "codex",
+				resumeExistingSession: true,
+				agentSessionId: "55555555-5555-4555-8555-555555555555",
+			}),
+		);
+	});
+
 	it("restarts Claude sessions by resuming the generated session id", async () => {
 		const spawnedSessions: Array<ReturnType<typeof createMockPtySession>> = [];
 		ptySessionSpawnMock.mockImplementation((request: MockSpawnRequest) => {

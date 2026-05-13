@@ -8,6 +8,7 @@ import { stripAnsi } from "./output-utils";
 const MAX_CODEX_ROLLOUT_FILES_TO_SCAN = 250;
 const CODEX_ROLLOUT_FILE_FRESH_WINDOW_MS = 10 * 60 * 1000;
 const CODEX_ROLLOUT_MATCH_SCAN_BYTES = 256 * 1024;
+const CODEX_ROLLOUT_SEARCH_EXTRA_DAYS = 1;
 const MAX_HERMES_SESSION_FILES_TO_SCAN = 100;
 const HERMES_SESSION_FILE_FRESH_WINDOW_MS = 10 * 60 * 1000;
 
@@ -27,6 +28,7 @@ interface HermesSessionRecord {
 interface SessionFileCandidate {
 	path: string;
 	mtimeMs: number;
+	size: number;
 }
 
 function asRecord(value: unknown): Record<string, unknown> | null {
@@ -83,44 +85,85 @@ async function readFilePrefix(filePath: string, byteLength: number): Promise<str
 	}
 }
 
-async function listCodexRolloutFiles(rootPath: string): Promise<string[]> {
-	const stack = [rootPath];
-	const files: Array<{ path: string; mtimeMs: number }> = [];
+function formatDatePathPart(value: number): string {
+	return value.toString().padStart(2, "0");
+}
 
-	while (stack.length > 0) {
-		const current = stack.pop();
-		if (!current) {
-			continue;
-		}
+function addCodexSessionDateRoot(roots: Set<string>, rootPath: string, timestamp: number, useUtc: boolean): void {
+	const date = new Date(timestamp);
+	const year = useUtc ? date.getUTCFullYear() : date.getFullYear();
+	const month = useUtc ? date.getUTCMonth() + 1 : date.getMonth() + 1;
+	const day = useUtc ? date.getUTCDate() : date.getDate();
+	roots.add(join(rootPath, String(year), formatDatePathPart(month), formatDatePathPart(day)));
+}
 
-		let entries: Dirent[];
-		try {
-			entries = await readdir(current, { withFileTypes: true });
-		} catch {
-			continue;
-		}
+function getCodexSessionSearchRoots(rootPath: string, sessionStartedAtMs: number): string[] {
+	const roots = new Set<string>();
+	for (let offset = -CODEX_ROLLOUT_SEARCH_EXTRA_DAYS; offset <= CODEX_ROLLOUT_SEARCH_EXTRA_DAYS; offset += 1) {
+		const timestamp = sessionStartedAtMs + offset * 24 * 60 * 60 * 1000;
+		addCodexSessionDateRoot(roots, rootPath, timestamp, false);
+		addCodexSessionDateRoot(roots, rootPath, timestamp, true);
+	}
+	roots.add(rootPath);
+	return Array.from(roots);
+}
 
-		for (const entry of entries) {
-			const entryPath = join(current, entry.name);
-			if (entry.isDirectory()) {
-				stack.push(entryPath);
+async function listCodexRolloutFiles(rootPath: string, sessionStartedAtMs: number): Promise<SessionFileCandidate[]> {
+	const roots = getCodexSessionSearchRoots(rootPath, sessionStartedAtMs);
+	const files: SessionFileCandidate[] = [];
+	const seenPaths = new Set<string>();
+	const minMtimeMs = sessionStartedAtMs - CODEX_ROLLOUT_FILE_FRESH_WINDOW_MS;
+
+	for (const current of roots) {
+		const stack = [current];
+		const allowNestedDirectories = current !== rootPath;
+
+		while (stack.length > 0) {
+			const directory = stack.pop();
+			if (!directory) {
 				continue;
 			}
-			if (!entry.isFile() || !entry.name.startsWith("rollout-") || !entry.name.endsWith(".jsonl")) {
-				continue;
-			}
-			let fileStat: Stats;
+
+			let entries: Dirent[];
 			try {
-				fileStat = await stat(entryPath);
+				entries = await readdir(directory, { withFileTypes: true });
 			} catch {
 				continue;
 			}
-			files.push({ path: entryPath, mtimeMs: fileStat.mtimeMs });
+
+			for (const entry of entries) {
+				const entryPath = join(directory, entry.name);
+				if (entry.isDirectory()) {
+					if (allowNestedDirectories) {
+						stack.push(entryPath);
+					}
+					continue;
+				}
+				if (
+					!entry.isFile() ||
+					!entry.name.startsWith("rollout-") ||
+					!entry.name.endsWith(".jsonl") ||
+					seenPaths.has(entryPath)
+				) {
+					continue;
+				}
+				let fileStat: Stats;
+				try {
+					fileStat = await stat(entryPath);
+				} catch {
+					continue;
+				}
+				if (fileStat.mtimeMs < minMtimeMs) {
+					continue;
+				}
+				seenPaths.add(entryPath);
+				files.push({ path: entryPath, mtimeMs: fileStat.mtimeMs, size: fileStat.size });
+			}
 		}
 	}
 
 	files.sort((a, b) => b.mtimeMs - a.mtimeMs);
-	return files.map((file) => file.path);
+	return files.slice(0, MAX_CODEX_ROLLOUT_FILES_TO_SCAN);
 }
 
 async function listHermesSessionFiles(rootPath: string): Promise<SessionFileCandidate[]> {
@@ -139,16 +182,27 @@ async function listHermesSessionFiles(rootPath: string): Promise<SessionFileCand
 		const entryPath = join(rootPath, entry.name);
 		try {
 			const fileStat = await stat(entryPath);
-			files.push({ path: entryPath, mtimeMs: fileStat.mtimeMs });
+			files.push({ path: entryPath, mtimeMs: fileStat.mtimeMs, size: fileStat.size });
 		} catch {}
 	}
 	files.sort((a, b) => b.mtimeMs - a.mtimeMs);
 	return files;
 }
 
+function isCodexDescendantSessionMeta(record: Record<string, unknown>): boolean {
+	const payload = asRecord(record.payload);
+	const source = payload ? asRecord(payload.source) : null;
+	const subagent = source ? asRecord(source.subagent) : null;
+	const threadSpawn = subagent ? asRecord(subagent.thread_spawn) : null;
+	return threadSpawn !== null;
+}
+
 function extractCodexSessionIdFromSessionMeta(record: Record<string, unknown>, cwd?: string): string | null {
 	const lineType = readStringField(record, "type");
 	if (lineType !== "session_meta") {
+		return null;
+	}
+	if (isCodexDescendantSessionMeta(record)) {
 		return null;
 	}
 	const payload = asRecord(record.payload);
@@ -275,22 +329,12 @@ export async function resolveCodexSessionIdForCwd(
 	}
 	const normalizedCwd = normalizePathForComparison(cwd);
 	const encodedCwd = JSON.stringify(normalizedCwd);
-	const rolloutFiles = (await listCodexRolloutFiles(sessionsRoot)).slice(0, MAX_CODEX_ROLLOUT_FILES_TO_SCAN);
+	const rolloutFiles = await listCodexRolloutFiles(sessionsRoot, sessionStartedAtMs);
 
-	for (const filePath of rolloutFiles) {
-		let fileStat: Stats;
-		try {
-			fileStat = await stat(filePath);
-			if (fileStat.mtimeMs < sessionStartedAtMs - CODEX_ROLLOUT_FILE_FRESH_WINDOW_MS) {
-				continue;
-			}
-		} catch {
-			continue;
-		}
-
+	for (const file of rolloutFiles) {
 		let prefix = "";
 		try {
-			prefix = await readFilePrefix(filePath, Math.min(fileStat.size, CODEX_ROLLOUT_MATCH_SCAN_BYTES));
+			prefix = await readFilePrefix(file.path, Math.min(file.size, CODEX_ROLLOUT_MATCH_SCAN_BYTES));
 		} catch {
 			continue;
 		}

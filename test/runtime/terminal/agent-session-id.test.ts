@@ -9,6 +9,20 @@ import {
 	resolveHermesSessionIdForPrompt,
 } from "../../../src/terminal/agent-session-id";
 
+function formatDatePathPart(value: number): string {
+	return value.toString().padStart(2, "0");
+}
+
+function getCodexSessionDateDir(root: string, timestamp: number): string {
+	const date = new Date(timestamp);
+	return join(
+		root,
+		String(date.getFullYear()),
+		formatDatePathPart(date.getMonth() + 1),
+		formatDatePathPart(date.getDate()),
+	);
+}
+
 describe("agent session id helpers", () => {
 	it("extracts labeled session ids from terminal output", () => {
 		expect(extractAgentSessionIdFromOutput("hermes", "Session ID: hermes-session_123\n")).toBe("hermes-session_123");
@@ -29,13 +43,34 @@ describe("agent session id helpers", () => {
 		expect(extractAgentSessionIdFromOutput("codex", `${line}\n`)).toBe("22222222-2222-4222-8222-222222222222");
 	});
 
+	it("ignores Codex descendant session_meta lines", () => {
+		const line = JSON.stringify({
+			type: "session_meta",
+			payload: {
+				id: "child-session-123",
+				cwd: "/tmp/kanban/task",
+				source: {
+					subagent: {
+						thread_spawn: {
+							parent_thread_id: "root-session-123",
+							depth: 1,
+						},
+					},
+				},
+			},
+		});
+
+		expect(extractAgentSessionIdFromOutput("codex", `${line}\n`)).toBeNull();
+	});
+
 	it("resolves Codex session ids from matching rollout files", async () => {
 		const tempDir = await mkdtemp(join(tmpdir(), "kanban-codex-session-id-"));
 		const sessionsRoot = join(tempDir, "sessions");
 		const taskCwd = "/tmp/kanban/task-session-id";
+		const startedAt = Date.now() - 1000;
 
 		try {
-			const dateDir = join(sessionsRoot, "2026", "05", "13");
+			const dateDir = getCodexSessionDateDir(sessionsRoot, startedAt);
 			await mkdir(dateDir, { recursive: true });
 			await writeFile(
 				join(dateDir, "rollout-2026-05-13T00-00-01-other.jsonl"),
@@ -60,7 +95,7 @@ describe("agent session id helpers", () => {
 				"utf8",
 			);
 
-			const resolved = await resolveCodexSessionIdForCwd(taskCwd, Date.now() - 1000, sessionsRoot);
+			const resolved = await resolveCodexSessionIdForCwd(taskCwd, startedAt, sessionsRoot);
 			expect(resolved).toBe("44444444-4444-4444-8444-444444444444");
 		} finally {
 			await rm(tempDir, { recursive: true, force: true });

@@ -2,7 +2,9 @@
 // It owns process lifecycle, terminal protocol filtering, and summary updates
 // for command-driven agents such as Claude Code, Codex, Gemini, and shell sessions.
 import { randomUUID } from "node:crypto";
+import { StringDecoder } from "node:string_decoder";
 import type {
+	RuntimeAgentId,
 	RuntimeTaskHookActivity,
 	RuntimeTaskImage,
 	RuntimeTaskSessionReviewReason,
@@ -42,8 +44,11 @@ import type { TerminalSessionListener, TerminalSessionService } from "./terminal
 import { TerminalStateMirror } from "./terminal-state-mirror";
 
 const MAX_WORKSPACE_TRUST_BUFFER_CHARS = 16_384;
+const MAX_AGENT_SESSION_ID_OUTPUT_BUFFER_CHARS = 64 * 1024;
 const AUTO_RESTART_WINDOW_MS = 5_000;
 const MAX_AUTO_RESTARTS_PER_WINDOW = 3;
+const CODEX_SESSION_ID_PROBE_INTERVAL_MS = 2_000;
+const MAX_CODEX_SESSION_ID_PROBE_ATTEMPTS = 5;
 // TUI apps (Codex, OpenCode) can query OSC 10/11 before the browser terminal is attached
 // and ready to answer. We intercept those startup probes during early PTY output, synthesize
 // foreground/background color replies, then disable the filter once a live terminal listener
@@ -71,6 +76,8 @@ interface ActiveProcessState {
 	autoConfirmedWorkspaceTrust: boolean;
 	workspaceTrustConfirmTimer: NodeJS.Timeout | null;
 	agentSessionIdProbeTimer: NodeJS.Timeout | null;
+	agentSessionIdOutputDecoder: StringDecoder | null;
+	agentSessionIdOutputBuffer: string;
 }
 
 interface SessionEntry {
@@ -166,6 +173,13 @@ function supportsPersistentAgentSessionId(agentId: AgentAdapterLaunchInput["agen
 function normalizeStoredSessionId(sessionId: string | null | undefined): string | null {
 	const trimmed = sessionId?.trim();
 	return trimmed ? trimmed : null;
+}
+
+function trimAgentSessionIdOutputBuffer(buffer: string): string {
+	if (buffer.length <= MAX_AGENT_SESSION_ID_OUTPUT_BUFFER_CHARS) {
+		return buffer;
+	}
+	return buffer.slice(-MAX_AGENT_SESSION_ID_OUTPUT_BUFFER_CHARS);
 }
 
 function resolveLaunchAgentSessionId(
@@ -314,6 +328,67 @@ export class TerminalSessionManager implements TerminalSessionService {
 		this.emitSummary(summary);
 	}
 
+	private consumeAgentSessionIdOutput(
+		entry: SessionEntry,
+		agentId: RuntimeAgentId,
+		data: string,
+		options: { flush?: boolean } = {},
+	): string | null {
+		const active = entry.active;
+		if (!active || entry.summary.agentSessionId) {
+			return null;
+		}
+
+		const directSessionId = data ? extractAgentSessionIdFromOutput(agentId, data) : null;
+		if (directSessionId) {
+			active.agentSessionIdOutputBuffer = "";
+			return directSessionId;
+		}
+
+		if (data) {
+			active.agentSessionIdOutputBuffer = trimAgentSessionIdOutputBuffer(active.agentSessionIdOutputBuffer + data);
+		}
+		if (!active.agentSessionIdOutputBuffer) {
+			return null;
+		}
+
+		const lastLineBreakIndex = Math.max(
+			active.agentSessionIdOutputBuffer.lastIndexOf("\n"),
+			active.agentSessionIdOutputBuffer.lastIndexOf("\r"),
+		);
+		if (lastLineBreakIndex < 0 && options.flush !== true) {
+			return null;
+		}
+
+		const outputToInspect =
+			options.flush === true
+				? active.agentSessionIdOutputBuffer
+				: active.agentSessionIdOutputBuffer.slice(0, lastLineBreakIndex + 1);
+		active.agentSessionIdOutputBuffer =
+			options.flush === true
+				? ""
+				: trimAgentSessionIdOutputBuffer(active.agentSessionIdOutputBuffer.slice(lastLineBreakIndex + 1));
+
+		const bufferedSessionId = extractAgentSessionIdFromOutput(agentId, outputToInspect);
+		if (bufferedSessionId) {
+			active.agentSessionIdOutputBuffer = "";
+		}
+		return bufferedSessionId;
+	}
+
+	private flushAgentSessionIdOutput(entry: SessionEntry): void {
+		const active = entry.active;
+		const agentId = entry.summary.agentId;
+		if (!active || !agentId || !supportsPersistentAgentSessionId(agentId) || entry.summary.agentSessionId) {
+			return;
+		}
+		const decoderTail = active.agentSessionIdOutputDecoder?.end() ?? "";
+		const agentSessionId = this.consumeAgentSessionIdOutput(entry, agentId, decoderTail, { flush: true });
+		if (agentSessionId) {
+			this.recordAgentSessionId(entry, agentSessionId);
+		}
+	}
+
 	private startCodexSessionIdProbe(entry: SessionEntry, cwd: string, startedAt: number): void {
 		if (!entry.active || entry.summary.agentId !== "codex" || entry.summary.agentSessionId) {
 			return;
@@ -341,19 +416,19 @@ export class TerminalSessionManager implements TerminalSessionService {
 						if (entry.active) {
 							stopAgentSessionIdProbeTimer(entry.active);
 						}
-					} else if (attempts >= 20 && entry.active) {
+					} else if (attempts >= MAX_CODEX_SESSION_ID_PROBE_ATTEMPTS && entry.active) {
 						stopAgentSessionIdProbeTimer(entry.active);
 					}
 				})
 				.catch(() => {
-					if (attempts >= 20 && entry.active) {
+					if (attempts >= MAX_CODEX_SESSION_ID_PROBE_ATTEMPTS && entry.active) {
 						stopAgentSessionIdProbeTimer(entry.active);
 					}
 				})
 				.finally(() => {
 					isResolving = false;
 				});
-		}, 500);
+		}, CODEX_SESSION_ID_PROBE_INTERVAL_MS);
 		timer.unref?.();
 		entry.active.agentSessionIdProbeTimer = timer;
 	}
@@ -554,10 +629,12 @@ export class TerminalSessionManager implements TerminalSessionService {
 						entry.active.deferredStartupInput !== null ||
 						(entry.active.detectOutputTransition !== null &&
 							(entry.active.shouldInspectOutputForTransition?.(entry.summary) ?? true));
-					const data = needsDecodedOutput ? filteredChunk.toString("utf8") : "";
+					const data = needsDecodedOutput
+						? (entry.active.agentSessionIdOutputDecoder?.write(filteredChunk) ?? filteredChunk.toString("utf8"))
+						: "";
 
 					if (shouldInspectForAgentSessionId && data.length > 0) {
-						const agentSessionId = extractAgentSessionIdFromOutput(request.agentId, data);
+						const agentSessionId = this.consumeAgentSessionIdOutput(entry, request.agentId, data);
 						if (agentSessionId) {
 							this.recordAgentSessionId(entry, agentSessionId);
 						}
@@ -664,6 +741,7 @@ export class TerminalSessionManager implements TerminalSessionService {
 					if (!currentActive) {
 						return;
 					}
+					this.flushAgentSessionIdOutput(currentEntry);
 					stopActiveProcessTimers(currentActive);
 
 					const summary = this.applySessionEvent(currentEntry, {
@@ -742,6 +820,11 @@ export class TerminalSessionManager implements TerminalSessionService {
 			autoConfirmedWorkspaceTrust: false,
 			workspaceTrustConfirmTimer: null,
 			agentSessionIdProbeTimer: null,
+			agentSessionIdOutputDecoder:
+				supportsPersistentAgentSessionId(request.agentId) && !launchAgentSessionId
+					? new StringDecoder("utf8")
+					: null,
+			agentSessionIdOutputBuffer: "",
 		};
 		entry.active = active;
 		entry.terminalStateMirror = terminalStateMirror;
@@ -903,6 +986,8 @@ export class TerminalSessionManager implements TerminalSessionService {
 			autoConfirmedWorkspaceTrust: false,
 			workspaceTrustConfirmTimer: null,
 			agentSessionIdProbeTimer: null,
+			agentSessionIdOutputDecoder: null,
+			agentSessionIdOutputBuffer: "",
 		};
 		entry.active = active;
 		entry.terminalStateMirror = terminalStateMirror;
