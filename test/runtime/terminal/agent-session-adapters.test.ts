@@ -620,8 +620,10 @@ describe("prepareAgentLaunch hook strategies", () => {
 			cwd: "/tmp",
 			prompt: "",
 			resumeFromTrash: true,
+			agentSessionId: "codex-session-123",
 		});
-		expect(codexLaunch.args).toEqual(expect.arrayContaining(["resume", "--last"]));
+		expect(codexLaunch.args).toEqual(expect.arrayContaining(["resume", "codex-session-123"]));
+		expect(codexLaunch.args).not.toContain("--last");
 
 		const claudeLaunch = await prepareAgentLaunch({
 			taskId: "task-claude",
@@ -631,8 +633,10 @@ describe("prepareAgentLaunch hook strategies", () => {
 			cwd: "/tmp",
 			prompt: "",
 			resumeFromTrash: true,
+			agentSessionId: "11111111-1111-4111-8111-111111111111",
 		});
-		expect(claudeLaunch.args).toContain("--continue");
+		expect(claudeLaunch.args).toEqual(expect.arrayContaining(["--resume", "11111111-1111-4111-8111-111111111111"]));
+		expect(claudeLaunch.args).not.toContain("--continue");
 
 		const geminiLaunch = await prepareAgentLaunch({
 			taskId: "task-gemini",
@@ -686,8 +690,10 @@ describe("prepareAgentLaunch hook strategies", () => {
 			cwd: "/tmp",
 			prompt: "",
 			resumeFromTrash: true,
+			agentSessionId: "hermes-session-123",
 		});
-		expect(hermesLaunch.args).toContain("--continue");
+		expect(hermesLaunch.args).toEqual(expect.arrayContaining(["--resume", "hermes-session-123"]));
+		expect(hermesLaunch.args).not.toContain("--continue");
 		expect(hermesLaunch.deferredStartupInput).toBeUndefined();
 
 		const clineLaunch = await prepareAgentLaunch({
@@ -712,6 +718,7 @@ describe("prepareAgentLaunch hook strategies", () => {
 			cwd: "/tmp",
 			prompt: "",
 			resumeFromTrash: true,
+			agentSessionId: "codex-session-hooks",
 			workspaceId: "workspace-1",
 		});
 
@@ -730,6 +737,27 @@ describe("prepareAgentLaunch hook strategies", () => {
 			expect(configIndex).toBeGreaterThan(-1);
 			expect(configIndex).toBeLessThan(resumeIndex);
 		}
+	});
+
+	it("resumes existing Codex sessions without replaying the original prompt", async () => {
+		setupTempHome();
+
+		const launch = await prepareAgentLaunch({
+			taskId: "task-codex-auto-restart",
+			agentId: "codex",
+			binary: "codex",
+			args: [],
+			cwd: "/tmp",
+			prompt: "Promote the release",
+			startInPlanMode: true,
+			resumeExistingSession: true,
+			agentSessionId: "codex-session-auto",
+		});
+
+		expect(launch.args).toEqual(expect.arrayContaining(["resume", "codex-session-auto"]));
+		expect(launch.args).not.toContain("--last");
+		expect(launch.args).not.toContain("Promote the release");
+		expect(launch.deferredStartupInput).toBeUndefined();
 	});
 
 	it("applies autonomous mode flags in adapters for non-droid CLIs", async () => {

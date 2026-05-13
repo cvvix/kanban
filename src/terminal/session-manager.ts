@@ -1,6 +1,7 @@
 // PTY-backed runtime for non-Cline task sessions and the workspace shell terminal.
 // It owns process lifecycle, terminal protocol filtering, and summary updates
 // for command-driven agents such as Claude Code, Codex, Gemini, and shell sessions.
+import { randomUUID } from "node:crypto";
 import type {
 	RuntimeTaskHookActivity,
 	RuntimeTaskImage,
@@ -15,6 +16,11 @@ import {
 	type AgentOutputTransitionInspectionPredicate,
 	prepareAgentLaunch,
 } from "./agent-session-adapters";
+import {
+	extractAgentSessionIdFromOutput,
+	resolveCodexSessionIdForCwd,
+	resolveHermesSessionIdForPrompt,
+} from "./agent-session-id";
 import {
 	hasClaudeWorkspaceTrustPrompt,
 	shouldAutoConfirmClaudeWorkspaceTrust,
@@ -64,6 +70,7 @@ interface ActiveProcessState {
 	suppressNextHermesPromptReview: boolean;
 	autoConfirmedWorkspaceTrust: boolean;
 	workspaceTrustConfirmTimer: NodeJS.Timeout | null;
+	agentSessionIdProbeTimer: NodeJS.Timeout | null;
 }
 
 interface SessionEntry {
@@ -90,6 +97,7 @@ export interface StartTaskSessionRequest {
 	startInPlanMode?: boolean;
 	resumeFromTrash?: boolean;
 	resumeExistingSession?: boolean;
+	agentSessionId?: string | null;
 	cols?: number;
 	rows?: number;
 	env?: Record<string, string | undefined>;
@@ -115,6 +123,7 @@ function createDefaultSummary(taskId: string): RuntimeTaskSessionSummary {
 		taskId,
 		state: "idle",
 		agentId: null,
+		agentSessionId: null,
 		workspacePath: null,
 		pid: null,
 		startedAt: null,
@@ -147,6 +156,45 @@ function updateSummary(entry: SessionEntry, patch: Partial<RuntimeTaskSessionSum
 
 function isActiveState(state: RuntimeTaskSessionState): boolean {
 	return state === "running" || state === "awaiting_review";
+}
+
+function supportsPersistentAgentSessionId(agentId: AgentAdapterLaunchInput["agentId"] | null): boolean {
+	return agentId === "claude" || agentId === "codex" || agentId === "hermes";
+}
+
+function normalizeStoredSessionId(sessionId: string | null | undefined): string | null {
+	const trimmed = sessionId?.trim();
+	return trimmed ? trimmed : null;
+}
+
+function resolveLaunchAgentSessionId(
+	request: StartTaskSessionRequest,
+	currentSessionId: string | null | undefined,
+): string | null {
+	if (!supportsPersistentAgentSessionId(request.agentId)) {
+		return null;
+	}
+	const existingSessionId =
+		normalizeStoredSessionId(request.agentSessionId) ?? normalizeStoredSessionId(currentSessionId);
+	if (existingSessionId) {
+		return existingSessionId;
+	}
+	if (request.agentId === "claude" && !request.resumeFromTrash && !request.resumeExistingSession) {
+		return randomUUID();
+	}
+	return null;
+}
+
+function stopAgentSessionIdProbeTimer(active: ActiveProcessState): void {
+	if (active.agentSessionIdProbeTimer) {
+		clearInterval(active.agentSessionIdProbeTimer);
+		active.agentSessionIdProbeTimer = null;
+	}
+}
+
+function stopActiveProcessTimers(active: ActiveProcessState): void {
+	stopWorkspaceTrustTimers(active);
+	stopAgentSessionIdProbeTimer(active);
 }
 
 function cloneStartTaskSessionRequest(request: StartTaskSessionRequest): StartTaskSessionRequest {
@@ -251,6 +299,108 @@ export class TerminalSessionManager implements TerminalSessionService {
 		return false;
 	}
 
+	private recordAgentSessionId(entry: SessionEntry, agentSessionId: string): void {
+		if (entry.summary.agentSessionId === agentSessionId) {
+			return;
+		}
+		if (entry.active) {
+			stopAgentSessionIdProbeTimer(entry.active);
+		}
+		const summary = updateSummary(entry, { agentSessionId });
+		for (const listener of entry.listeners.values()) {
+			listener.onState?.(cloneSummary(summary));
+		}
+		this.emitSummary(summary);
+	}
+
+	private startCodexSessionIdProbe(entry: SessionEntry, cwd: string, startedAt: number): void {
+		if (!entry.active || entry.summary.agentId !== "codex" || entry.summary.agentSessionId) {
+			return;
+		}
+		let isResolving = false;
+		let attempts = 0;
+		const timer = setInterval(() => {
+			if (!entry.active || entry.summary.agentId !== "codex" || entry.summary.agentSessionId) {
+				if (entry.active) {
+					stopAgentSessionIdProbeTimer(entry.active);
+				} else {
+					clearInterval(timer);
+				}
+				return;
+			}
+			if (isResolving) {
+				return;
+			}
+			attempts += 1;
+			isResolving = true;
+			resolveCodexSessionIdForCwd(cwd, startedAt)
+				.then((sessionId) => {
+					if (sessionId) {
+						this.recordAgentSessionId(entry, sessionId);
+						if (entry.active) {
+							stopAgentSessionIdProbeTimer(entry.active);
+						}
+					} else if (attempts >= 20 && entry.active) {
+						stopAgentSessionIdProbeTimer(entry.active);
+					}
+				})
+				.catch(() => {
+					if (attempts >= 20 && entry.active) {
+						stopAgentSessionIdProbeTimer(entry.active);
+					}
+				})
+				.finally(() => {
+					isResolving = false;
+				});
+		}, 500);
+		timer.unref?.();
+		entry.active.agentSessionIdProbeTimer = timer;
+	}
+
+	private startHermesSessionIdProbe(entry: SessionEntry, prompt: string, startedAt: number): void {
+		if (!entry.active || entry.summary.agentId !== "hermes" || entry.summary.agentSessionId) {
+			return;
+		}
+		let isResolving = false;
+		let attempts = 0;
+		const timer = setInterval(() => {
+			if (!entry.active || entry.summary.agentId !== "hermes" || entry.summary.agentSessionId) {
+				if (entry.active) {
+					stopAgentSessionIdProbeTimer(entry.active);
+				} else {
+					clearInterval(timer);
+				}
+				return;
+			}
+			if (isResolving) {
+				return;
+			}
+			attempts += 1;
+			isResolving = true;
+			resolveHermesSessionIdForPrompt(prompt, startedAt)
+				.then((sessionId) => {
+					if (sessionId) {
+						this.recordAgentSessionId(entry, sessionId);
+						if (entry.active) {
+							stopAgentSessionIdProbeTimer(entry.active);
+						}
+					} else if (attempts >= 20 && entry.active) {
+						stopAgentSessionIdProbeTimer(entry.active);
+					}
+				})
+				.catch(() => {
+					if (attempts >= 20 && entry.active) {
+						stopAgentSessionIdProbeTimer(entry.active);
+					}
+				})
+				.finally(() => {
+					isResolving = false;
+				});
+		}, 500);
+		timer.unref?.();
+		entry.active.agentSessionIdProbeTimer = timer;
+	}
+
 	onSummary(listener: (summary: RuntimeTaskSessionSummary) => void): () => void {
 		this.summaryListeners.add(listener);
 		return () => {
@@ -310,16 +460,21 @@ export class TerminalSessionManager implements TerminalSessionService {
 
 	async startTaskSession(request: StartTaskSessionRequest): Promise<RuntimeTaskSessionSummary> {
 		const entry = this.ensureEntry(request.taskId);
+		const launchAgentSessionId = resolveLaunchAgentSessionId(request, entry.summary.agentSessionId);
+		const restartRequest = cloneStartTaskSessionRequest({
+			...request,
+			agentSessionId: launchAgentSessionId,
+		});
 		entry.restartRequest = {
 			kind: "task",
-			request: cloneStartTaskSessionRequest(request),
+			request: restartRequest,
 		};
 		if (entry.active && isActiveState(entry.summary.state)) {
 			return cloneSummary(entry.summary);
 		}
 
 		if (entry.active) {
-			stopWorkspaceTrustTimers(entry.active);
+			stopActiveProcessTimers(entry.active);
 			entry.active.session.stop();
 			entry.active = null;
 		}
@@ -349,6 +504,7 @@ export class TerminalSessionManager implements TerminalSessionService {
 			startInPlanMode: request.startInPlanMode,
 			resumeFromTrash: request.resumeFromTrash,
 			resumeExistingSession: request.resumeExistingSession,
+			agentSessionId: launchAgentSessionId,
 			env: request.env,
 			workspaceId: request.workspaceId,
 		});
@@ -385,12 +541,22 @@ export class TerminalSessionManager implements TerminalSessionService {
 					}
 					entry.terminalStateMirror?.applyOutput(filteredChunk);
 
+					const shouldInspectForAgentSessionId =
+						supportsPersistentAgentSessionId(request.agentId) && !entry.summary.agentSessionId;
 					const needsDecodedOutput =
+						shouldInspectForAgentSessionId ||
 						entry.active.workspaceTrustBuffer !== null ||
 						entry.active.deferredStartupInput !== null ||
 						(entry.active.detectOutputTransition !== null &&
 							(entry.active.shouldInspectOutputForTransition?.(entry.summary) ?? true));
 					const data = needsDecodedOutput ? filteredChunk.toString("utf8") : "";
+
+					if (shouldInspectForAgentSessionId && data.length > 0) {
+						const agentSessionId = extractAgentSessionIdFromOutput(request.agentId, data);
+						if (agentSessionId) {
+							this.recordAgentSessionId(entry, agentSessionId);
+						}
+					}
 
 					if (entry.active.workspaceTrustBuffer !== null) {
 						entry.active.workspaceTrustBuffer += data;
@@ -493,7 +659,7 @@ export class TerminalSessionManager implements TerminalSessionService {
 					if (!currentActive) {
 						return;
 					}
-					stopWorkspaceTrustTimers(currentActive);
+					stopActiveProcessTimers(currentActive);
 
 					const summary = this.applySessionEvent(currentEntry, {
 						type: "process.exit",
@@ -531,6 +697,7 @@ export class TerminalSessionManager implements TerminalSessionService {
 			const summary = updateSummary(entry, {
 				state: "failed",
 				agentId: request.agentId,
+				agentSessionId: launchAgentSessionId ?? entry.summary.agentSessionId ?? null,
 				workspacePath: request.cwd,
 				pid: null,
 				startedAt: null,
@@ -569,6 +736,7 @@ export class TerminalSessionManager implements TerminalSessionService {
 			suppressNextHermesPromptReview: false,
 			autoConfirmedWorkspaceTrust: false,
 			workspaceTrustConfirmTimer: null,
+			agentSessionIdProbeTimer: null,
 		};
 		entry.active = active;
 		entry.terminalStateMirror = terminalStateMirror;
@@ -577,6 +745,7 @@ export class TerminalSessionManager implements TerminalSessionService {
 		updateSummary(entry, {
 			state: request.resumeFromTrash ? "awaiting_review" : "running",
 			agentId: request.agentId,
+			agentSessionId: launchAgentSessionId ?? entry.summary.agentSessionId ?? null,
 			workspacePath: request.cwd,
 			pid: session.pid,
 			startedAt,
@@ -589,6 +758,8 @@ export class TerminalSessionManager implements TerminalSessionService {
 			latestTurnCheckpoint: null,
 			previousTurnCheckpoint: null,
 		});
+		this.startCodexSessionIdProbe(entry, request.cwd, startedAt);
+		this.startHermesSessionIdProbe(entry, request.prompt, startedAt);
 		this.emitSummary(entry.summary);
 
 		return cloneSummary(entry.summary);
@@ -605,7 +776,7 @@ export class TerminalSessionManager implements TerminalSessionService {
 		}
 
 		if (entry.active) {
-			stopWorkspaceTrustTimers(entry.active);
+			stopActiveProcessTimers(entry.active);
 			entry.active.session.stop();
 			entry.active = null;
 		}
@@ -670,7 +841,7 @@ export class TerminalSessionManager implements TerminalSessionService {
 					if (!currentActive) {
 						return;
 					}
-					stopWorkspaceTrustTimers(currentActive);
+					stopActiveProcessTimers(currentActive);
 
 					const summary = updateSummary(currentEntry, {
 						state: currentActive.session.wasInterrupted() ? "interrupted" : "idle",
@@ -692,6 +863,7 @@ export class TerminalSessionManager implements TerminalSessionService {
 			const summary = updateSummary(entry, {
 				state: "failed",
 				agentId: null,
+				agentSessionId: null,
 				workspacePath: request.cwd,
 				pid: null,
 				startedAt: null,
@@ -724,6 +896,7 @@ export class TerminalSessionManager implements TerminalSessionService {
 			suppressNextHermesPromptReview: false,
 			autoConfirmedWorkspaceTrust: false,
 			workspaceTrustConfirmTimer: null,
+			agentSessionIdProbeTimer: null,
 		};
 		entry.active = active;
 		entry.terminalStateMirror = terminalStateMirror;
@@ -731,6 +904,7 @@ export class TerminalSessionManager implements TerminalSessionService {
 		updateSummary(entry, {
 			state: "running",
 			agentId: null,
+			agentSessionId: null,
 			workspacePath: request.cwd,
 			pid: session.pid,
 			startedAt: now(),
@@ -981,7 +1155,7 @@ export class TerminalSessionManager implements TerminalSessionService {
 		entry.suppressAutoRestartOnExit = true;
 		const cleanupFn = entry.active.onSessionCleanup;
 		entry.active.onSessionCleanup = null;
-		stopWorkspaceTrustTimers(entry.active);
+		stopActiveProcessTimers(entry.active);
 		entry.active.session.stop();
 		if (cleanupFn) {
 			cleanupFn().catch(() => {
@@ -997,7 +1171,7 @@ export class TerminalSessionManager implements TerminalSessionService {
 			if (!entry.active) {
 				continue;
 			}
-			stopWorkspaceTrustTimers(entry.active);
+			stopActiveProcessTimers(entry.active);
 			entry.active.session.stop({ interrupted: true });
 		}
 		return activeEntries.map((entry) => cloneSummary(entry.summary));
@@ -1071,8 +1245,22 @@ export class TerminalSessionManager implements TerminalSessionService {
 		pendingAutoRestart = (async () => {
 			try {
 				const nextRequest = cloneStartTaskSessionRequest(restartRequest.request);
-				if (nextRequest.agentId === "hermes") {
+				if (
+					nextRequest.agentId === "hermes" &&
+					!normalizeStoredSessionId(entry.summary.agentSessionId) &&
+					!normalizeStoredSessionId(nextRequest.agentSessionId)
+				) {
+					const sessionId = await resolveHermesSessionIdForPrompt(
+						nextRequest.prompt,
+						entry.summary.startedAt ?? now(),
+					);
+					if (sessionId) {
+						this.recordAgentSessionId(entry, sessionId);
+					}
+				}
+				if (supportsPersistentAgentSessionId(nextRequest.agentId)) {
 					nextRequest.resumeExistingSession = true;
+					nextRequest.agentSessionId = entry.summary.agentSessionId ?? nextRequest.agentSessionId ?? null;
 				}
 				await this.startTaskSession(nextRequest);
 			} catch (error) {

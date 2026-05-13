@@ -1,3 +1,6 @@
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const prepareAgentLaunchMock = vi.hoisted(() => vi.fn());
@@ -141,6 +144,7 @@ describe("TerminalSessionManager auto-restart", () => {
 			prompt: "Fix the bug",
 		});
 
+		spawnedSessions[0]?.triggerData("Session ID: hermes-session-abc\n");
 		spawnedSessions[0]?.triggerExit(130);
 
 		await vi.waitFor(() => {
@@ -152,6 +156,158 @@ describe("TerminalSessionManager auto-restart", () => {
 				taskId: "task-hermes-restart",
 				agentId: "hermes",
 				resumeExistingSession: true,
+				agentSessionId: "hermes-session-abc",
+			}),
+		);
+	});
+
+	it("restarts Hermes sessions by resolving the recorded session file when output has no session id", async () => {
+		const originalHome = process.env.HOME;
+		const tempHome = await mkdtemp(join(tmpdir(), "kanban-hermes-home-"));
+		const spawnedSessions: Array<ReturnType<typeof createMockPtySession>> = [];
+
+		try {
+			process.env.HOME = tempHome;
+			ptySessionSpawnMock.mockImplementation((request: MockSpawnRequest) => {
+				const session = createMockPtySession(spawnedSessions.length === 0 ? 111 : 222, request);
+				spawnedSessions.push(session);
+				return session;
+			});
+
+			const manager = new TerminalSessionManager();
+			manager.attach("task-hermes-file-restart", {
+				onState: vi.fn(),
+				onOutput: vi.fn(),
+				onExit: vi.fn(),
+			});
+
+			await manager.startTaskSession({
+				taskId: "task-hermes-file-restart",
+				agentId: "hermes",
+				binary: "hermes",
+				args: ["chat"],
+				cwd: "/tmp/task-hermes-file-restart",
+				prompt: "Fix the Hermes resume flow",
+			});
+
+			const sessionsRoot = join(tempHome, ".hermes", "sessions");
+			await mkdir(sessionsRoot, { recursive: true });
+			await writeFile(
+				join(sessionsRoot, "session_20260513_010001_match.json"),
+				JSON.stringify({
+					session_id: "20260513_010001_match",
+					messages: [{ role: "user", content: "Fix the Hermes resume flow" }],
+				}),
+				"utf8",
+			);
+			spawnedSessions[0]?.triggerExit(130);
+
+			await vi.waitFor(() => {
+				expect(ptySessionSpawnMock).toHaveBeenCalledTimes(2);
+			});
+			expect(prepareAgentLaunchMock).toHaveBeenNthCalledWith(
+				2,
+				expect.objectContaining({
+					taskId: "task-hermes-file-restart",
+					agentId: "hermes",
+					resumeExistingSession: true,
+					agentSessionId: "20260513_010001_match",
+				}),
+			);
+		} finally {
+			if (originalHome === undefined) {
+				delete process.env.HOME;
+			} else {
+				process.env.HOME = originalHome;
+			}
+			await rm(tempHome, { recursive: true, force: true });
+		}
+	});
+
+	it("restarts Codex sessions by resuming the recorded CLI session", async () => {
+		const spawnedSessions: Array<ReturnType<typeof createMockPtySession>> = [];
+		ptySessionSpawnMock.mockImplementation((request: MockSpawnRequest) => {
+			const session = createMockPtySession(spawnedSessions.length === 0 ? 111 : 222, request);
+			spawnedSessions.push(session);
+			return session;
+		});
+
+		const manager = new TerminalSessionManager();
+		manager.attach("task-codex-restart", {
+			onState: vi.fn(),
+			onOutput: vi.fn(),
+			onExit: vi.fn(),
+		});
+
+		await manager.startTaskSession({
+			taskId: "task-codex-restart",
+			agentId: "codex",
+			binary: "codex",
+			args: [],
+			cwd: "/tmp/task-codex-restart",
+			prompt: "Promote the release",
+		});
+
+		spawnedSessions[0]?.triggerData(
+			`${JSON.stringify({
+				type: "session_meta",
+				payload: { id: "22222222-2222-4222-8222-222222222222", cwd: "/tmp/task-codex-restart" },
+			})}\n`,
+		);
+		spawnedSessions[0]?.triggerExit(130);
+
+		await vi.waitFor(() => {
+			expect(ptySessionSpawnMock).toHaveBeenCalledTimes(2);
+		});
+		expect(prepareAgentLaunchMock).toHaveBeenNthCalledWith(
+			2,
+			expect.objectContaining({
+				taskId: "task-codex-restart",
+				agentId: "codex",
+				resumeExistingSession: true,
+				agentSessionId: "22222222-2222-4222-8222-222222222222",
+			}),
+		);
+	});
+
+	it("restarts Claude sessions by resuming the generated session id", async () => {
+		const spawnedSessions: Array<ReturnType<typeof createMockPtySession>> = [];
+		ptySessionSpawnMock.mockImplementation((request: MockSpawnRequest) => {
+			const session = createMockPtySession(spawnedSessions.length === 0 ? 111 : 222, request);
+			spawnedSessions.push(session);
+			return session;
+		});
+
+		const manager = new TerminalSessionManager();
+		manager.attach("task-claude-restart", {
+			onState: vi.fn(),
+			onOutput: vi.fn(),
+			onExit: vi.fn(),
+		});
+
+		await manager.startTaskSession({
+			taskId: "task-claude-restart",
+			agentId: "claude",
+			binary: "claude",
+			args: [],
+			cwd: "/tmp/task-claude-restart",
+			prompt: "Fix the bug",
+		});
+
+		const agentSessionId = manager.getSummary("task-claude-restart")?.agentSessionId;
+		expect(agentSessionId).toMatch(/^[0-9a-f-]{36}$/);
+		spawnedSessions[0]?.triggerExit(130);
+
+		await vi.waitFor(() => {
+			expect(ptySessionSpawnMock).toHaveBeenCalledTimes(2);
+		});
+		expect(prepareAgentLaunchMock).toHaveBeenNthCalledWith(
+			2,
+			expect.objectContaining({
+				taskId: "task-claude-restart",
+				agentId: "claude",
+				resumeExistingSession: true,
+				agentSessionId,
 			}),
 		);
 	});

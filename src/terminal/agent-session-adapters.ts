@@ -37,6 +37,7 @@ export interface AgentAdapterLaunchInput {
 	startInPlanMode?: boolean;
 	resumeFromTrash?: boolean;
 	resumeExistingSession?: boolean;
+	agentSessionId?: string | null;
 	env?: Record<string, string | undefined>;
 	workspaceId?: string;
 }
@@ -126,6 +127,18 @@ function hasCliOption(args: string[], optionName: string): boolean {
 		}
 	}
 	return false;
+}
+
+function hasAnyCliOption(args: string[], optionNames: string[]): boolean {
+	return optionNames.some((optionName) => hasCliOption(args, optionName));
+}
+
+function getRequiredResumeSessionId(input: AgentAdapterLaunchInput, agentLabel: string): string {
+	const sessionId = input.agentSessionId?.trim();
+	if (!sessionId) {
+		throw new Error(`Cannot resume ${agentLabel} session because no session id was recorded for this task.`);
+	}
+	return sessionId;
 }
 
 function getClineHookScriptPath(
@@ -621,6 +634,7 @@ const claudeAdapter: AgentSessionAdapter = {
 			FORCE_HYPERLINK: "1",
 		};
 		const appendedSystemPrompt = resolveHomeAgentAppendSystemPrompt(input.taskId);
+		const shouldResumeExistingClaudeSession = input.resumeFromTrash || input.resumeExistingSession;
 		if (
 			input.autonomousModeEnabled &&
 			!input.startInPlanMode &&
@@ -628,10 +642,13 @@ const claudeAdapter: AgentSessionAdapter = {
 		) {
 			args.push("--dangerously-skip-permissions");
 		}
-		if (input.resumeFromTrash && !hasCliOption(args, "--continue")) {
-			args.push("--continue");
+		if (shouldResumeExistingClaudeSession && !hasAnyCliOption(args, ["--resume", "-r"])) {
+			args.push("--resume", getRequiredResumeSessionId(input, "Claude"));
 		}
-		if (input.startInPlanMode) {
+		if (!shouldResumeExistingClaudeSession && input.agentSessionId && !hasCliOption(args, "--session-id")) {
+			args.push("--session-id", input.agentSessionId);
+		}
+		if (input.startInPlanMode && !shouldResumeExistingClaudeSession) {
 			const withoutImmediateBypass = args.filter((arg) => arg !== "--dangerously-skip-permissions");
 			args.length = 0;
 			args.push(...withoutImmediateBypass);
@@ -710,6 +727,13 @@ const claudeAdapter: AgentSessionAdapter = {
 			args.push("--append-system-prompt", appendedSystemPrompt);
 		}
 
+		if (shouldResumeExistingClaudeSession) {
+			return {
+				args,
+				env,
+			};
+		}
+
 		const withPromptLaunch = withPrompt(args, input.prompt, "append");
 		return {
 			...withPromptLaunch,
@@ -757,6 +781,20 @@ function shouldInspectCodexOutputForTransition(summary: RuntimeTaskSessionSummar
 	);
 }
 
+function hasCodexResumeSessionId(args: string[]): boolean {
+	const resumeIndex = args.indexOf("resume");
+	if (resumeIndex < 0) {
+		return false;
+	}
+	for (let index = resumeIndex + 1; index < args.length; index += 1) {
+		const arg = args[index];
+		if (arg && !arg.startsWith("-")) {
+			return true;
+		}
+	}
+	return false;
+}
+
 const codexAdapter: AgentSessionAdapter = {
 	async prepare(input) {
 		const codexArgs = [...input.args];
@@ -773,12 +811,18 @@ const codexAdapter: AgentSessionAdapter = {
 			codexArgs.push("--dangerously-bypass-approvals-and-sandbox");
 		}
 
-		if (input.resumeFromTrash) {
+		const shouldResumeExistingCodexSession = input.resumeFromTrash || input.resumeExistingSession;
+		if (shouldResumeExistingCodexSession) {
+			const sessionId = getRequiredResumeSessionId(input, "Codex");
+			const lastIndex = codexArgs.indexOf("--last");
+			if (lastIndex >= 0) {
+				codexArgs.splice(lastIndex, 1);
+			}
 			if (!codexArgs.includes("resume")) {
 				codexArgs.push("resume");
 			}
-			if (!hasCliOption(codexArgs, "--last")) {
-				codexArgs.push("--last");
+			if (!hasCodexResumeSessionId(codexArgs)) {
+				codexArgs.push(sessionId);
 			}
 		}
 
@@ -799,7 +843,9 @@ const codexAdapter: AgentSessionAdapter = {
 		}
 
 		const trimmed = input.prompt.trim();
-		if (input.startInPlanMode) {
+		if (shouldResumeExistingCodexSession) {
+			deferredStartupInput = undefined;
+		} else if (input.startInPlanMode) {
 			const planCommand = trimmed ? `/plan ${trimmed}` : "/plan";
 			deferredStartupInput = toBracketedPasteSubmission(planCommand);
 		} else if (trimmed) {
@@ -1418,8 +1464,8 @@ const hermesAdapter: AgentSessionAdapter = {
 			args.push("--quiet");
 		}
 
-		if (shouldResumeExistingSession && !hasCliOption(args, "--continue") && !hasCliOption(args, "-c")) {
-			args.push("--continue");
+		if (shouldResumeExistingSession && !hasAnyCliOption(args, ["--resume", "-r"])) {
+			args.push("--resume", getRequiredResumeSessionId(input, "Hermes"));
 		}
 
 		if (!shouldResumeExistingSession) {

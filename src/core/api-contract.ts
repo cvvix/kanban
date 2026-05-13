@@ -293,6 +293,7 @@ export const runtimeTaskSessionSummarySchema = z.object({
 	state: runtimeTaskSessionStateSchema,
 	mode: runtimeTaskSessionModeSchema.nullable().optional(),
 	agentId: runtimeAgentIdSchema.nullable(),
+	agentSessionId: z.string().nullable().optional(),
 	workspacePath: z.string().nullable(),
 	pid: z.number().nullable(),
 	startedAt: z.number().nullable(),
