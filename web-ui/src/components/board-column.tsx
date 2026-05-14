@@ -19,6 +19,7 @@ export function BoardColumn({
 	editingTaskId,
 	inlineTaskEditor,
 	onEditTask,
+	onCopyTask,
 	onSaveTitle,
 	onCommitTask,
 	onOpenPrTask,
@@ -49,6 +50,7 @@ export function BoardColumn({
 	editingTaskId?: string | null;
 	inlineTaskEditor?: ReactNode;
 	onEditTask?: (card: BoardCardModel) => void;
+	onCopyTask?: (card: BoardCardModel) => void;
 	onSaveTitle?: (taskId: string, title: string) => void;
 	onCommitTask?: (taskId: string) => void;
 	onOpenPrTask?: (taskId: string) => void;
@@ -175,6 +177,7 @@ export function BoardColumn({
 											onStart={onStartTask}
 											onMoveToTrash={onMoveToTrashTask}
 											onRestoreFromTrash={onRestoreFromTrashTask}
+											onCopyTask={onCopyTask}
 											onCommit={onCommitTask}
 											onOpenPr={onOpenPrTask}
 											onCancelAutomaticAction={onCancelAutomaticTaskAction}

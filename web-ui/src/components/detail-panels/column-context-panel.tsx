@@ -23,6 +23,7 @@ function ColumnSection({
 	editingTaskId,
 	inlineTaskEditor,
 	onEditTask,
+	onCopyTask,
 	onSaveTitle,
 	onCommitTask,
 	onOpenPrTask,
@@ -47,6 +48,7 @@ function ColumnSection({
 	editingTaskId?: string | null;
 	inlineTaskEditor?: ReactNode;
 	onEditTask?: (card: BoardCardModel) => void;
+	onCopyTask?: (card: BoardCardModel) => void;
 	onSaveTitle?: (taskId: string, title: string) => void;
 	onCommitTask?: (taskId: string) => void;
 	onOpenPrTask?: (taskId: string) => void;
@@ -193,6 +195,7 @@ function ColumnSection({
 												onStart={onStartTask}
 												onMoveToTrash={onMoveToTrashTask}
 												onRestoreFromTrash={onRestoreFromTrashTask}
+												onCopyTask={onCopyTask}
 												onCommit={onCommitTask}
 												onOpenPr={onOpenPrTask}
 												isCommitLoading={commitTaskLoadingById?.[card.id] ?? false}
@@ -241,6 +244,7 @@ export function ColumnContextPanel({
 	editingTaskId,
 	inlineTaskEditor,
 	onEditTask,
+	onCopyTask,
 	onSaveTaskTitle,
 	onCommitTask,
 	onOpenPrTask,
@@ -263,6 +267,7 @@ export function ColumnContextPanel({
 	editingTaskId?: string | null;
 	inlineTaskEditor?: ReactNode;
 	onEditTask?: (card: BoardCardModel) => void;
+	onCopyTask?: (card: BoardCardModel) => void;
 	onSaveTaskTitle?: (taskId: string, title: string) => void;
 	onCommitTask?: (taskId: string) => void;
 	onOpenPrTask?: (taskId: string) => void;
@@ -352,6 +357,7 @@ export function ColumnContextPanel({
 							editingTaskId={column.id === "backlog" ? editingTaskId : null}
 							inlineTaskEditor={column.id === "backlog" ? inlineTaskEditor : undefined}
 							onEditTask={column.id === "backlog" ? onEditTask : undefined}
+							onCopyTask={column.id !== "trash" ? onCopyTask : undefined}
 							onSaveTitle={column.id !== "trash" ? onSaveTaskTitle : undefined}
 							onCommitTask={column.id === "review" ? onCommitTask : undefined}
 							onOpenPrTask={column.id === "review" ? onOpenPrTask : undefined}

@@ -72,6 +72,7 @@ export interface UseTaskEditorResult {
 	editTaskClineSettings: RuntimeTaskClineSettings | undefined;
 	setEditTaskClineSettings: Dispatch<SetStateAction<RuntimeTaskClineSettings | undefined>>;
 	handleOpenCreateTask: () => void;
+	handleOpenCopyTask: (task: BoardCard) => void;
 	handleCancelCreateTask: () => void;
 	handleOpenEditTask: (task: BoardCard, options?: OpenEditTaskOptions) => void;
 	handleCancelEditTask: () => void;
@@ -207,6 +208,18 @@ export function useTaskEditor({
 		setEditTaskPrompt("");
 		setEditTaskImages([]);
 
+		setNewTaskAgentId(undefined);
+		setNewTaskClineSettings(undefined);
+		setIsInlineTaskCreateOpen(true);
+	}, []);
+
+	const handleOpenCopyTask = useCallback((task: BoardCard) => {
+		setEditingTaskId(null);
+		setEditTaskPrompt("");
+		setEditTaskImages([]);
+
+		setNewTaskPrompt(task.prompt.trim());
+		setNewTaskImages([]);
 		setNewTaskAgentId(undefined);
 		setNewTaskClineSettings(undefined);
 		setIsInlineTaskCreateOpen(true);
@@ -524,6 +537,7 @@ export function useTaskEditor({
 		editTaskClineSettings,
 		setEditTaskClineSettings,
 		handleOpenCreateTask,
+		handleOpenCopyTask,
 		handleCancelCreateTask,
 		handleOpenEditTask,
 		handleCancelEditTask,

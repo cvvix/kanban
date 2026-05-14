@@ -323,6 +323,7 @@ export default function App(): ReactElement {
 		editTaskClineSettings,
 		setEditTaskClineSettings,
 		handleOpenCreateTask,
+		handleOpenCopyTask,
 		handleCancelCreateTask,
 		handleOpenEditTask,
 		handleCancelEditTask,
@@ -943,6 +944,7 @@ export default function App(): ReactElement {
 												editingTaskId={editingTaskId}
 												inlineTaskEditor={inlineTaskEditor}
 												onEditTask={handleOpenEditTask}
+												onCopyTask={handleOpenCopyTask}
 												onSaveTaskTitle={handleSaveTaskTitle}
 												onCommitTask={handleCommitTask}
 												onOpenPrTask={handleOpenPrTask}
@@ -1028,6 +1030,7 @@ export default function App(): ReactElement {
 									onEditTask={(task) => {
 										handleOpenEditTask(task, { preserveDetailSelection: true });
 									}}
+									onCopyTask={handleOpenCopyTask}
 									onSaveTaskTitle={handleSaveTaskTitle}
 									onCommitTask={handleCommitTask}
 									onOpenPrTask={handleOpenPrTask}

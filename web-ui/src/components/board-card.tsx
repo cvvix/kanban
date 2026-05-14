@@ -2,7 +2,7 @@ import { Draggable } from "@hello-pangea/dnd";
 import { getRuntimeAgentCatalogEntry } from "@runtime-agent-catalog";
 import { formatClineToolCallLabel } from "@runtime-cline-tool-call-display";
 import { buildTaskWorktreeDisplayPath } from "@runtime-task-worktree-path";
-import { AlertCircle, AlertTriangle, Bot, GitBranch, Pencil, Play, RotateCcw, Trash2 } from "lucide-react";
+import { AlertCircle, AlertTriangle, Bot, CopyPlus, GitBranch, Pencil, Play, RotateCcw, Trash2 } from "lucide-react";
 import type { KeyboardEvent, MouseEvent } from "react";
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
@@ -220,6 +220,7 @@ export function BoardCard({
 	onStart,
 	onMoveToTrash,
 	onRestoreFromTrash,
+	onCopyTask,
 	onSaveTitle,
 	onCommit,
 	onOpenPr,
@@ -244,6 +245,7 @@ export function BoardCard({
 	onStart?: (taskId: string) => void;
 	onMoveToTrash?: (taskId: string) => void;
 	onRestoreFromTrash?: (taskId: string) => void;
+	onCopyTask?: (card: BoardCardModel) => void;
 	onSaveTitle?: (taskId: string, title: string) => void;
 	onCommit?: (taskId: string) => void;
 	onOpenPr?: (taskId: string) => void;
@@ -468,6 +470,40 @@ export function BoardCard({
 	}, [agentOverrideLabel, modelOverrideLabel]);
 
 	const activeDescriptionDisplay = isDescriptionExpanded ? descriptionDisplay.expanded : descriptionDisplay.collapsed;
+	const titleActionButton = onCopyTask ? (
+		<button
+			type="button"
+			aria-label="Copy task to new task"
+			onMouseDown={stopEvent}
+			onClick={(event) => {
+				stopEvent(event);
+				onCopyTask(card);
+			}}
+			className={cn(
+				"shrink-0 cursor-pointer rounded-sm p-0.5 text-text-tertiary hover:text-text-primary focus-visible:opacity-100 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent",
+				isHovered ? "opacity-100" : "opacity-0",
+			)}
+		>
+			<CopyPlus size={12} />
+		</button>
+	) : onSaveTitle ? (
+		<button
+			type="button"
+			aria-label="Edit task title"
+			onMouseDown={stopEvent}
+			onClick={(event) => {
+				stopEvent(event);
+				setDraftTitle(card.title);
+				setIsEditingTitle(true);
+			}}
+			className={cn(
+				"shrink-0 cursor-pointer rounded-sm p-0.5 text-text-tertiary hover:text-text-primary focus-visible:opacity-100 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent",
+				isHovered ? "opacity-100" : "opacity-0",
+			)}
+		>
+			<Pencil size={12} />
+		</button>
+	) : null;
 
 	return (
 		<Draggable draggableId={card.id} index={index} isDragDisabled={false}>
@@ -564,7 +600,7 @@ export function BoardCard({
 											}}
 											className="h-7 w-full rounded-md border border-border-focus bg-surface-2 px-2 text-sm font-medium text-text-primary focus:outline-none"
 										/>
-									) : onSaveTitle ? (
+									) : titleActionButton ? (
 										<div className="flex items-center gap-1 min-w-0">
 											<p
 												className={cn(
@@ -574,22 +610,7 @@ export function BoardCard({
 											>
 												{displayTitle}
 											</p>
-											<button
-												type="button"
-												aria-label="Edit task title"
-												onMouseDown={stopEvent}
-												onClick={(event) => {
-													stopEvent(event);
-													setDraftTitle(card.title);
-													setIsEditingTitle(true);
-												}}
-												className={cn(
-													"shrink-0 cursor-pointer rounded-sm p-0.5 text-text-tertiary hover:text-text-primary focus-visible:opacity-100 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent",
-													isHovered ? "opacity-100" : "opacity-0",
-												)}
-											>
-												<Pencil size={12} />
-											</button>
+											{titleActionButton}
 										</div>
 									) : (
 										<p

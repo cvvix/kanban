@@ -38,6 +38,7 @@ export function KanbanBoard({
 	editingTaskId,
 	inlineTaskEditor,
 	onEditTask,
+	onCopyTask,
 	onSaveTaskTitle,
 	onCommitTask,
 	onOpenPrTask,
@@ -65,6 +66,7 @@ export function KanbanBoard({
 	editingTaskId?: string | null;
 	inlineTaskEditor?: ReactNode;
 	onEditTask?: (card: BoardCard) => void;
+	onCopyTask?: (card: BoardCard) => void;
 	onSaveTaskTitle?: (taskId: string, title: string) => void;
 	onCommitTask?: (taskId: string) => void;
 	onOpenPrTask?: (taskId: string) => void;
@@ -392,6 +394,7 @@ export function KanbanBoard({
 						editingTaskId={column.id === "backlog" ? editingTaskId : null}
 						inlineTaskEditor={column.id === "backlog" ? inlineTaskEditor : undefined}
 						onEditTask={column.id === "backlog" ? onEditTask : undefined}
+						onCopyTask={column.id !== "trash" ? onCopyTask : undefined}
 						onSaveTitle={column.id !== "trash" ? onSaveTaskTitle : undefined}
 						onCommitTask={column.id === "review" ? onCommitTask : undefined}
 						onOpenPrTask={column.id === "review" ? onOpenPrTask : undefined}

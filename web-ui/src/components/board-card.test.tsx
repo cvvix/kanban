@@ -248,6 +248,30 @@ describe("BoardCard", () => {
 		expect(container.textContent).not.toContain("final hidden segment");
 	});
 
+	it("uses the title action button to copy the full task prompt into a new task", async () => {
+		const onCopyTask = vi.fn();
+		const card = createCard({
+			prompt: "Task title||Full task description that is longer than the visible card preview",
+		});
+
+		await act(async () => {
+			root.render(
+				<BoardCard card={card} index={0} columnId="backlog" onCopyTask={onCopyTask} onSaveTitle={() => {}} />,
+			);
+		});
+
+		const copyButton = container.querySelector<HTMLButtonElement>('button[aria-label="Copy task to new task"]');
+		expect(copyButton).toBeInstanceOf(HTMLButtonElement);
+		expect(container.querySelector('button[aria-label="Edit task title"]')).toBeNull();
+
+		await act(async () => {
+			copyButton?.dispatchEvent(new MouseEvent("mousedown", { bubbles: true }));
+			copyButton?.click();
+		});
+
+		expect(onCopyTask).toHaveBeenCalledWith(card);
+	});
+
 	it("reconstructs and shows trashed worktree path when workspace metadata is not tracked", async () => {
 		await act(async () => {
 			root.render(

@@ -46,6 +46,7 @@ interface HookSnapshot {
 	editTaskStartInPlanMode: boolean;
 	isEditTaskStartInPlanModeDisabled: boolean;
 	handleOpenCreateTask: () => void;
+	handleOpenCopyTask: (task: BoardCard) => void;
 	handleCreateTask: (options?: { keepDialogOpen?: boolean }) => string | null;
 	handleCreateTasks: (prompts: string[], options?: { keepDialogOpen?: boolean }) => string[];
 	setNewTaskPrompt: (value: string) => void;
@@ -103,6 +104,7 @@ function HookHarness({
 			editTaskStartInPlanMode: editor.editTaskStartInPlanMode,
 			isEditTaskStartInPlanModeDisabled: editor.isEditTaskStartInPlanModeDisabled,
 			handleOpenCreateTask: editor.handleOpenCreateTask,
+			handleOpenCopyTask: editor.handleOpenCopyTask,
 			handleCreateTask: editor.handleCreateTask,
 			handleCreateTasks: editor.handleCreateTasks,
 			setNewTaskPrompt: editor.setNewTaskPrompt,
@@ -121,6 +123,7 @@ function HookHarness({
 		editor.handleCreateTask,
 		editor.handleCreateTasks,
 		editor.handleOpenCreateTask,
+		editor.handleOpenCopyTask,
 		editor.editTaskPrompt,
 		editor.editTaskStartInPlanMode,
 		editor.editingTaskId,
@@ -341,6 +344,40 @@ describe("useTaskEditor", () => {
 		expect(snapshot.newTaskClineSettings).toBeUndefined();
 		expect(snapshot.board.columns[0]?.cards.some((card) => card.prompt === "Create another task")).toBe(true);
 	});
+
+	it("opens create dialog with the copied task prompt", async () => {
+		let latestSnapshot: HookSnapshot | null = null;
+		const initialBoard = createBoard([
+			createTask("task-1", "Title\n\nFull task description with hidden card details", 1),
+		]);
+
+		await act(async () => {
+			root.render(
+				<HookHarness
+					initialBoard={initialBoard}
+					onSnapshot={(snapshot) => {
+						latestSnapshot = snapshot;
+					}}
+				/>,
+			);
+		});
+
+		const task = requireSnapshot(latestSnapshot).board.columns[0]?.cards[0];
+		if (!task) {
+			throw new Error("Expected a backlog task.");
+		}
+
+		await act(async () => {
+			requireSnapshot(latestSnapshot).handleOpenCopyTask(task);
+		});
+
+		const snapshot = requireSnapshot(latestSnapshot);
+		expect(snapshot.isInlineTaskCreateOpen).toBe(true);
+		expect(snapshot.editingTaskId).toBeNull();
+		expect(snapshot.newTaskPrompt).toBe("Title\n\nFull task description with hidden card details");
+		expect(snapshot.newTaskImages).toEqual([]);
+	});
+
 	it("copies attached images to each split task and clears the draft images", async () => {
 		let latestSnapshot: HookSnapshot | null = null;
 
