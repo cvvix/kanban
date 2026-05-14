@@ -7,6 +7,10 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import type { RuntimeTaskSessionSummary } from "../../src/core/api-contract";
 import {
+	loadAgentSessionRegistration,
+	writeAgentSessionRegistration,
+} from "../../src/state/agent-session-registration";
+import {
 	loadWorkspaceContext,
 	loadWorkspaceSessionRecoveryRecord,
 	syncWorkspaceSessionRecoveryFromSummary,
@@ -76,5 +80,30 @@ describe("workspace session recovery", () => {
 		);
 
 		await expect(loadWorkspaceSessionRecoveryRecord(context.workspaceId, "task-1")).resolves.toBeNull();
+	});
+
+	it("persists wrapper agent session registrations by workspace and task", async () => {
+		const context = await loadWorkspaceContext(repoPath);
+
+		await writeAgentSessionRegistration({
+			workspaceId: context.workspaceId,
+			taskId: "task-1",
+			agentId: "hermes",
+			agentSessionId: "20260513_010001_match",
+			workspacePath: "/tmp/worktree",
+			startedAt: 10,
+			updatedAt: 20,
+			source: "hermes-source:kanban:test",
+		});
+
+		await expect(loadAgentSessionRegistration(context.workspaceId, "task-1", "hermes")).resolves.toMatchObject({
+			taskId: "task-1",
+			agentId: "hermes",
+			agentSessionId: "20260513_010001_match",
+			workspacePath: "/tmp/worktree",
+			startedAt: 10,
+			updatedAt: 20,
+		});
+		await expect(loadAgentSessionRegistration(context.workspaceId, "task-1", "codex")).resolves.toBeNull();
 	});
 });

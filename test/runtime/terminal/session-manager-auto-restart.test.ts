@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { beforeEach, describe, expect, it, vi } from "vitest";
@@ -16,6 +16,7 @@ vi.mock("../../../src/terminal/pty-session.js", () => ({
 	},
 }));
 
+import { writeAgentSessionRegistration } from "../../../src/state/agent-session-registration";
 import { TerminalSessionManager } from "../../../src/terminal/session-manager";
 
 interface MockSpawnRequest {
@@ -182,9 +183,9 @@ describe("TerminalSessionManager auto-restart", () => {
 		);
 	});
 
-	it("restarts Hermes sessions by resolving the recorded session file when output has no session id", async () => {
+	it("restarts Hermes sessions by resolving the wrapper registration when output has no session id", async () => {
 		const originalHome = process.env.HOME;
-		const tempHome = await mkdtemp(join(tmpdir(), "kanban-hermes-home-"));
+		const tempHome = await mkdtemp(join(tmpdir(), "kanban-hermes-registry-"));
 		const spawnedSessions: Array<ReturnType<typeof createMockPtySession>> = [];
 
 		try {
@@ -209,18 +210,18 @@ describe("TerminalSessionManager auto-restart", () => {
 				args: ["chat"],
 				cwd: "/tmp/task-hermes-file-restart",
 				prompt: "Fix the Hermes resume flow",
+				workspaceId: "workspace-1",
 			});
 
-			const sessionsRoot = join(tempHome, ".hermes", "sessions");
-			await mkdir(sessionsRoot, { recursive: true });
-			await writeFile(
-				join(sessionsRoot, "session_20260513_010001_match.json"),
-				JSON.stringify({
-					session_id: "20260513_010001_match",
-					messages: [{ role: "user", content: "Fix the Hermes resume flow" }],
-				}),
-				"utf8",
-			);
+			await writeAgentSessionRegistration({
+				workspaceId: "workspace-1",
+				taskId: "task-hermes-file-restart",
+				agentId: "hermes",
+				agentSessionId: "20260513_010001_match",
+				workspacePath: "/tmp/task-hermes-file-restart",
+				startedAt: Date.now(),
+				source: "test",
+			});
 			spawnedSessions[0]?.triggerExit(130);
 
 			await vi.waitFor(() => {
@@ -466,7 +467,8 @@ describe("TerminalSessionManager auto-restart", () => {
 	});
 
 	it("sends deferred Hermes startup input when the interactive prompt appears", async () => {
-		const deferredStartupInput = "\u001b[200~Investigate deployment drift\u001b[201~\r";
+		vi.useFakeTimers();
+		const deferredStartupInput = "\u001b[200~Investigate deployment drift\u001b[201~";
 		prepareAgentLaunchMock.mockResolvedValue({
 			binary: "hermes",
 			args: ["chat", "--quiet"],
@@ -483,36 +485,45 @@ describe("TerminalSessionManager auto-restart", () => {
 			return session;
 		});
 
-		const manager = new TerminalSessionManager();
-		await manager.startTaskSession({
-			taskId: "task-hermes-1",
-			agentId: "hermes",
-			binary: "hermes",
-			args: ["chat"],
-			cwd: "/tmp/task-hermes-1",
-			prompt: "Investigate deployment drift",
-		});
+		try {
+			const manager = new TerminalSessionManager();
+			await manager.startTaskSession({
+				taskId: "task-hermes-1",
+				agentId: "hermes",
+				binary: "hermes",
+				args: ["chat"],
+				cwd: "/tmp/task-hermes-1",
+				prompt: "Investigate deployment drift",
+			});
 
-		const session = spawnedSessions[0];
-		expect(session).toBeDefined();
-		if (!session) {
-			return;
+			const session = spawnedSessions[0];
+			expect(session).toBeDefined();
+			if (!session) {
+				return;
+			}
+
+			session.triggerData("Welcome to Hermes Agent!\n");
+			expect(session.write).not.toHaveBeenCalledWith(deferredStartupInput);
+
+			session.triggerData("\n❯ ");
+			expect(session.write).toHaveBeenCalledWith(deferredStartupInput);
+			expect(session.write).toHaveBeenCalledTimes(1);
+			expect(manager.getSummary("task-hermes-1")?.state).toBe("running");
+
+			await vi.advanceTimersByTimeAsync(100);
+			expect(session.write).toHaveBeenCalledWith("\r");
+			expect(session.write).toHaveBeenCalledTimes(2);
+
+			session.triggerData("\nOK\n\n❯ ");
+			expect(manager.getSummary("task-hermes-1")?.state).toBe("awaiting_review");
+		} finally {
+			vi.useRealTimers();
 		}
-
-		session.triggerData("Welcome to Hermes Agent!\n");
-		expect(session.write).not.toHaveBeenCalledWith(deferredStartupInput);
-
-		session.triggerData("\n❯ ");
-		expect(session.write).toHaveBeenCalledWith(deferredStartupInput);
-		expect(session.write).toHaveBeenCalledTimes(1);
-		expect(manager.getSummary("task-hermes-1")?.state).toBe("running");
-
-		session.triggerData("\nOK\n\n❯ ");
-		expect(manager.getSummary("task-hermes-1")?.state).toBe("awaiting_review");
 	});
 
 	it("sends deferred Hermes startup input when the prompt marker is split across chunks", async () => {
-		const deferredStartupInput = "\u001b[200~Investigate deployment drift\u001b[201~\r";
+		vi.useFakeTimers();
+		const deferredStartupInput = "\u001b[200~Investigate deployment drift\u001b[201~";
 		prepareAgentLaunchMock.mockResolvedValue({
 			binary: "hermes",
 			args: ["chat", "--quiet"],
@@ -527,26 +538,34 @@ describe("TerminalSessionManager auto-restart", () => {
 			return session;
 		});
 
-		const manager = new TerminalSessionManager();
-		await manager.startTaskSession({
-			taskId: "task-hermes-2",
-			agentId: "hermes",
-			binary: "hermes",
-			args: ["chat"],
-			cwd: "/tmp/task-hermes-2",
-			prompt: "Investigate deployment drift",
-		});
+		try {
+			const manager = new TerminalSessionManager();
+			await manager.startTaskSession({
+				taskId: "task-hermes-2",
+				agentId: "hermes",
+				binary: "hermes",
+				args: ["chat"],
+				cwd: "/tmp/task-hermes-2",
+				prompt: "Investigate deployment drift",
+			});
 
-		const session = spawnedSessions[0];
-		expect(session).toBeDefined();
-		if (!session) {
-			return;
+			const session = spawnedSessions[0];
+			expect(session).toBeDefined();
+			if (!session) {
+				return;
+			}
+
+			session.triggerData("\n");
+			expect(session.write).not.toHaveBeenCalled();
+			session.triggerData("❯ ");
+			expect(session.write).toHaveBeenCalledWith(deferredStartupInput);
+			expect(session.write).toHaveBeenCalledTimes(1);
+
+			await vi.advanceTimersByTimeAsync(100);
+			expect(session.write).toHaveBeenCalledWith("\r");
+			expect(session.write).toHaveBeenCalledTimes(2);
+		} finally {
+			vi.useRealTimers();
 		}
-
-		session.triggerData("\n");
-		expect(session.write).not.toHaveBeenCalled();
-		session.triggerData("❯ ");
-		expect(session.write).toHaveBeenCalledWith(deferredStartupInput);
-		expect(session.write).toHaveBeenCalledTimes(1);
 	});
 });

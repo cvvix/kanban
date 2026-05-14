@@ -114,11 +114,9 @@ describe("prepareAgentLaunch hook strategies", () => {
 		expect(hookTrustState[0]).toContain('"/<session-flags>/config.toml:post_tool_use:0:0"');
 		expect(hookTrustState[0]).toContain('trusted_hash="sha256:');
 		expect(launchCommand).toContain("timeout=5");
-		expect(launchCommand).not.toContain("codex-wrapper");
+		expect(launchCommand).toContain("codex-wrapper");
+		expect(launchCommand).toContain("--real-binary codex");
 		expect(launchCommand).not.toContain("notify=");
-
-		const wrapperPath = join(homedir(), ".cline", "kanban", "hooks", "codex", "codex-wrapper.mjs");
-		expect(existsSync(wrapperPath)).toBe(false);
 	});
 
 	it("appends Kanban sidebar instructions for home Claude sessions", async () => {
@@ -428,13 +426,17 @@ describe("prepareAgentLaunch hook strategies", () => {
 
 		expect(launch.args).toContain("chat");
 		expect(launch.args).toContain("--yolo");
+		expect([launch.binary ?? "", ...launch.args].join(" ")).toContain("hermes-wrapper");
 		expect(launch.args).toContain("--source");
-		expect(launch.args).toContain("tool");
-		expect(launch.args).toContain("--quiet");
+		expect(launch.args).toContain("kanban:workspace-1:task-hermes-1");
+		expect(launch.args).toContain("--tui");
+		expect(launch.args).not.toContain("--quiet");
 		expect(launch.args).not.toContain("-q");
 		expect(launch.args).not.toContain("--query");
+		expect(launch.env.KANBAN_HOOK_TASK_ID).toBe("task-hermes-1");
+		expect(launch.env.KANBAN_HOOK_WORKSPACE_ID).toBe("workspace-1");
 		expect(launch.deferredStartupInput).toContain("Investigate deployment drift");
-		expect(launch.deferredStartupInput?.endsWith("\r")).toBe(true);
+		expect(launch.deferredStartupInput?.endsWith("\u001b[201~")).toBe(true);
 		expect(
 			launch.detectOutputTransition?.("\n❯ ", {
 				taskId: "task-hermes-1",
@@ -467,8 +469,11 @@ describe("prepareAgentLaunch hook strategies", () => {
 			cwd: "/tmp",
 			prompt: "Audit the deployment pipeline",
 			startInPlanMode: true,
+			workspaceId: "workspace-1",
 		});
 
+		expect([launch.binary ?? "", ...launch.args].join(" ")).toContain("hermes-wrapper");
+		expect(launch.args).toContain("--tui");
 		expect(launch.args).not.toContain("-q");
 		expect(launch.deferredStartupInput).toContain("Do not modify files");
 		expect(launch.deferredStartupInput).toContain("Task:\nAudit the deployment pipeline");

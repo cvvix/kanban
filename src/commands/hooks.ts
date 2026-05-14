@@ -1,5 +1,5 @@
 import { spawn } from "node:child_process";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { createTRPCProxyClient, httpBatchLink, TRPCClientError } from "@trpc/client";
 import type { Command } from "commander";
@@ -7,6 +7,9 @@ import type { RuntimeHookEvent, RuntimeTaskHookActivity } from "../core/api-cont
 import { buildKanbanCommandParts } from "../core/kanban-command";
 import { buildKanbanRuntimeUrl, getRuntimeFetch } from "../core/runtime-endpoint";
 import { buildWindowsCmdArgsArray, resolveWindowsComSpec, shouldUseWindowsCmdLaunch } from "../core/windows-cmd-launch";
+import { writeAgentSessionRegistration } from "../state/agent-session-registration";
+import type { RuntimeRecoverableAgentId } from "../state/workspace-state";
+import { resolveCodexSessionIdForCwd } from "../terminal/agent-session-id";
 import { parseHookRuntimeContextFromEnv } from "../terminal/hook-runtime-context";
 import type { RuntimeAppRouter } from "../trpc/app-router";
 import {
@@ -46,6 +49,11 @@ interface HookCommandMetadataOptionValues {
 }
 
 interface CodexWrapperArgs {
+	realBinary: string;
+	agentArgs: string[];
+}
+
+interface HermesWrapperArgs {
 	realBinary: string;
 	agentArgs: string[];
 }
@@ -446,6 +454,36 @@ function notifyCodexSessionWatcherEvent(mapped: CodexMappedHookEvent): void {
 	spawnBackgroundKanban(appendMetadataFlags(["hooks", "notify", "--event", mapped.event], mapped.metadata));
 }
 
+function normalizeAgentSessionId(value: string | null | undefined): string | null {
+	const trimmed = value?.trim().replace(/^[`"']+|[`"',.;:)]+$/g, "");
+	if (!trimmed || !/^[A-Za-z0-9][A-Za-z0-9._-]{5,191}$/.test(trimmed)) {
+		return null;
+	}
+	return trimmed;
+}
+
+async function writeWrapperAgentSessionRegistration(
+	agentId: RuntimeRecoverableAgentId,
+	agentSessionId: string,
+	startedAt: number,
+	source: string,
+): Promise<void> {
+	const normalizedSessionId = normalizeAgentSessionId(agentSessionId);
+	if (!normalizedSessionId) {
+		return;
+	}
+	const context = parseHookRuntimeContextFromEnv();
+	await writeAgentSessionRegistration({
+		workspaceId: context.workspaceId,
+		taskId: context.taskId,
+		agentId,
+		agentSessionId: normalizedSessionId,
+		workspacePath: process.cwd(),
+		startedAt,
+		source,
+	});
+}
+
 async function enrichCodexReviewMetadata(args: HooksIngestArgs, cwd: string): Promise<HooksIngestArgs> {
 	if (args.event !== "to_review") {
 		return args;
@@ -616,9 +654,41 @@ export function buildCodexWrapperSpawn(
 
 async function runCodexWrapperSubcommand(wrapperArgs: CodexWrapperArgs): Promise<void> {
 	const childEnv: NodeJS.ProcessEnv = { ...process.env };
+	const wrapperStartedAt = Date.now();
 	let shuttingDown = false;
 	let stopWatcher: () => Promise<void> = async () => {};
 	let watcherStartPromise: Promise<void> | null = null;
+	let cwdPollTimer: NodeJS.Timeout | null = null;
+	let queuedCwdPoll = Promise.resolve();
+	let registeredSessionId = "";
+
+	const registerSessionId = async (sessionId: string, source: string) => {
+		const normalizedSessionId = normalizeAgentSessionId(sessionId);
+		if (!normalizedSessionId || registeredSessionId === normalizedSessionId) {
+			return;
+		}
+		await writeWrapperAgentSessionRegistration("codex", normalizedSessionId, wrapperStartedAt, source);
+		registeredSessionId = normalizedSessionId;
+	};
+
+	const pollSessionIdFromCwd = async () => {
+		if (registeredSessionId) {
+			return;
+		}
+		const sessionId = await resolveCodexSessionIdForCwd(process.cwd(), wrapperStartedAt);
+		if (!sessionId) {
+			return;
+		}
+		await registerSessionId(sessionId, "codex-session-cwd");
+	};
+
+	const queueCwdPoll = () => {
+		queuedCwdPoll = queuedCwdPoll.then(
+			() => pollSessionIdFromCwd(),
+			() => pollSessionIdFromCwd(),
+		);
+		return queuedCwdPoll;
+	};
 
 	let shouldWatchSessionLog = false;
 	try {
@@ -645,6 +715,9 @@ async function runCodexWrapperSubcommand(wrapperArgs: CodexWrapperArgs): Promise
 					undefined,
 					{
 						cwd: process.cwd(),
+						onSessionId: (sessionId) => {
+							void registerSessionId(sessionId, "codex-session-log").catch(() => {});
+						},
 					},
 				);
 				if (shuttingDown) {
@@ -656,6 +729,11 @@ async function runCodexWrapperSubcommand(wrapperArgs: CodexWrapperArgs): Promise
 				// Best effort only.
 			});
 		}
+		cwdPollTimer = setInterval(() => {
+			void queueCwdPoll();
+		}, 500);
+		cwdPollTimer.unref?.();
+		void queueCwdPoll();
 	}
 
 	const childLaunch = buildCodexWrapperSpawn(wrapperArgs.realBinary, wrapperArgs.agentArgs);
@@ -682,6 +760,12 @@ async function runCodexWrapperSubcommand(wrapperArgs: CodexWrapperArgs): Promise
 
 	const cleanup = async () => {
 		shuttingDown = true;
+		if (cwdPollTimer) {
+			clearInterval(cwdPollTimer);
+			cwdPollTimer = null;
+		}
+		await queueCwdPoll().catch(() => {});
+		await queuedCwdPoll.catch(() => {});
 		await watcherStartPromise;
 		await stopWatcher();
 		process.off("SIGINT", onSigint);
@@ -707,6 +791,219 @@ async function runCodexWrapperSubcommand(wrapperArgs: CodexWrapperArgs): Promise
 		});
 		child.on("exit", (code) => {
 			finish(code ?? 1);
+		});
+	});
+}
+
+export function buildHermesWrapperSpawn(
+	realBinary: string,
+	agentArgs: string[],
+	platform: NodeJS.Platform = process.platform,
+	env: NodeJS.ProcessEnv = process.env,
+): { binary: string; args: string[] } {
+	if (!shouldUseWindowsCmdLaunch(realBinary, platform, env)) {
+		return {
+			binary: realBinary,
+			args: [...agentArgs],
+		};
+	}
+	return {
+		binary: resolveWindowsComSpec(env),
+		args: buildWindowsCmdArgsArray(realBinary, agentArgs),
+	};
+}
+
+function readCliOptionValue(args: string[], optionName: string): string | null {
+	for (let index = 0; index < args.length; index += 1) {
+		const arg = args[index];
+		if (arg === optionName) {
+			const next = args[index + 1];
+			return next && !next.startsWith("-") ? next : null;
+		}
+		if (arg.startsWith(`${optionName}=`)) {
+			const value = arg.slice(optionName.length + 1).trim();
+			return value || null;
+		}
+	}
+	return null;
+}
+
+function quoteSqlString(value: string): string {
+	return `'${value.replaceAll("'", "''")}'`;
+}
+
+function resolveHermesHome(env: NodeJS.ProcessEnv): string {
+	return env.HERMES_HOME?.trim() || join(homedir(), ".hermes");
+}
+
+async function runBufferedCommand(binary: string, args: string[], timeoutMs: number): Promise<string> {
+	return await new Promise((resolve) => {
+		const child = spawn(binary, args, {
+			stdio: ["ignore", "pipe", "ignore"],
+		});
+		let output = "";
+		const timeout = setTimeout(() => {
+			child.kill("SIGTERM");
+		}, timeoutMs);
+		timeout.unref?.();
+		child.stdout?.setEncoding("utf8");
+		child.stdout?.on("data", (chunk: string) => {
+			output += chunk;
+		});
+		child.on("error", () => {
+			clearTimeout(timeout);
+			resolve("");
+		});
+		child.on("exit", () => {
+			clearTimeout(timeout);
+			resolve(output);
+		});
+	});
+}
+
+async function resolveHermesSessionIdBySource(
+	source: string,
+	startedAt: number,
+	env: NodeJS.ProcessEnv,
+): Promise<string | null> {
+	const query = [
+		"SELECT id FROM sessions",
+		`WHERE source = ${quoteSqlString(source)}`,
+		`AND started_at >= ${Math.floor((startedAt - 10_000) / 1000)}`,
+		"ORDER BY started_at DESC LIMIT 1;",
+	].join(" ");
+	const output = await runBufferedCommand(
+		"sqlite3",
+		["-readonly", join(resolveHermesHome(env), "state.db"), query],
+		1500,
+	);
+	return normalizeAgentSessionId(output.split(/\r?\n/)[0]);
+}
+
+async function resolveHermesSessionIdBySystemPromptText(
+	text: string,
+	startedAt: number,
+	env: NodeJS.ProcessEnv,
+): Promise<string | null> {
+	const query = [
+		"SELECT id FROM sessions",
+		`WHERE system_prompt LIKE ${quoteSqlString(`%${text}%`)}`,
+		`AND started_at >= ${Math.floor((startedAt - 10_000) / 1000)}`,
+		"ORDER BY started_at DESC LIMIT 1;",
+	].join(" ");
+	const output = await runBufferedCommand(
+		"sqlite3",
+		["-readonly", join(resolveHermesHome(env), "state.db"), query],
+		1500,
+	);
+	return normalizeAgentSessionId(output.split(/\r?\n/)[0]);
+}
+
+async function runHermesWrapperSubcommand(wrapperArgs: HermesWrapperArgs): Promise<void> {
+	const childEnv: NodeJS.ProcessEnv = { ...process.env };
+	const wrapperStartedAt = Date.now();
+	const source = readCliOptionValue(wrapperArgs.agentArgs, "--source");
+	let systemPromptText = "";
+	let registeredSessionId = "";
+	let shuttingDown = false;
+	let queuedPoll = Promise.resolve();
+
+	const pollSessionId = async () => {
+		if (registeredSessionId) {
+			return;
+		}
+		let registrationSource = "";
+		let sessionId = source ? await resolveHermesSessionIdBySource(source, wrapperStartedAt, childEnv) : null;
+		if (sessionId) {
+			registrationSource = `hermes-source:${source}`;
+		} else if (systemPromptText) {
+			sessionId = await resolveHermesSessionIdBySystemPromptText(systemPromptText, wrapperStartedAt, childEnv);
+			if (sessionId) {
+				registrationSource = "hermes-system-prompt-cwd";
+			}
+		}
+		if (!sessionId || registeredSessionId === sessionId) {
+			return;
+		}
+		registeredSessionId = sessionId;
+		await writeWrapperAgentSessionRegistration("hermes", sessionId, wrapperStartedAt, registrationSource);
+	};
+	const queuePoll = () => {
+		queuedPoll = queuedPoll.then(
+			() => pollSessionId(),
+			() => pollSessionId(),
+		);
+		return queuedPoll;
+	};
+
+	let timer: NodeJS.Timeout | null = null;
+	try {
+		parseHookRuntimeContextFromEnv(childEnv);
+		systemPromptText = process.cwd();
+		if (source || systemPromptText) {
+			timer = setInterval(() => {
+				void queuePoll();
+			}, 500);
+			timer.unref?.();
+			void queuePoll();
+		}
+	} catch {
+		timer = null;
+	}
+
+	const childLaunch = buildHermesWrapperSpawn(wrapperArgs.realBinary, wrapperArgs.agentArgs);
+	const child = spawn(childLaunch.binary, childLaunch.args, {
+		stdio: "inherit",
+		env: childEnv,
+	});
+
+	const forwardSignal = (signal: NodeJS.Signals) => {
+		if (!child.killed) {
+			child.kill(signal);
+		}
+	};
+
+	const onSigint = () => {
+		forwardSignal("SIGINT");
+	};
+	const onSigterm = () => {
+		forwardSignal("SIGTERM");
+	};
+
+	process.on("SIGINT", onSigint);
+	process.on("SIGTERM", onSigterm);
+
+	const cleanup = async () => {
+		shuttingDown = true;
+		if (timer) {
+			clearInterval(timer);
+			timer = null;
+		}
+		await queuePoll().catch(() => {});
+		await queuedPoll.catch(() => {});
+		process.off("SIGINT", onSigint);
+		process.off("SIGTERM", onSigterm);
+	};
+
+	await new Promise<void>((resolve) => {
+		let finished = false;
+		const finish = (exitCode: number) => {
+			if (finished) {
+				return;
+			}
+			finished = true;
+			void (async () => {
+				await cleanup();
+				process.exitCode = exitCode;
+				resolve();
+			})();
+		};
+
+		child.on("error", () => {
+			finish(1);
+		});
+		child.on("exit", (code) => {
+			finish(code ?? (shuttingDown ? 0 : 1));
 		});
 	});
 }
@@ -813,6 +1110,18 @@ export function registerHooksCommand(program: Command): void {
 		.allowUnknownOption(true)
 		.action(async (agentArgs: string[] | undefined, options: { realBinary: string }) => {
 			await runCodexWrapperSubcommand({
+				realBinary: options.realBinary,
+				agentArgs: agentArgs ?? [],
+			});
+		});
+
+	hooks
+		.command("hermes-wrapper [agentArgs...]")
+		.description("Hermes wrapper that records Kanban session metadata.")
+		.requiredOption("--real-binary <path>", "Path to the actual hermes binary.")
+		.allowUnknownOption(true)
+		.action(async (agentArgs: string[] | undefined, options: { realBinary: string }) => {
+			await runHermesWrapperSubcommand({
 				realBinary: options.realBinary,
 				agentArgs: agentArgs ?? [],
 			});

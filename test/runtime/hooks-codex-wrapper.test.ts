@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { buildCodexWrapperChildArgs, buildCodexWrapperSpawn } from "../../src/commands/hooks";
+import { buildCodexWrapperChildArgs, buildCodexWrapperSpawn, buildHermesWrapperSpawn } from "../../src/commands/hooks";
 
 describe("buildCodexWrapperChildArgs", () => {
 	it("does not inject legacy notify config", () => {
@@ -38,5 +38,12 @@ describe("buildCodexWrapperChildArgs", () => {
 
 		expect(launch.binary).toBe("cmd.exe");
 		expect(launch.args).toEqual(["/c", "echo hi"]);
+	});
+
+	it("keeps Hermes TUI args intact inside the wrapper", () => {
+		const launch = buildHermesWrapperSpawn("hermes", ["chat", "--source", "kanban:workspace-1:task-1", "--tui"]);
+
+		expect(launch.binary).toBe("hermes");
+		expect(launch.args).toEqual(["chat", "--source", "kanban:workspace-1:task-1", "--tui"]);
 	});
 });

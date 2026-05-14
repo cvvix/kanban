@@ -119,6 +119,30 @@ function buildHooksCommand(args: string[]): string {
 	return buildHooksCommandParts(args).map(quoteShellArg).join(" ");
 }
 
+function buildAgentWrapperLaunch(
+	wrapperCommand: "codex-wrapper" | "hermes-wrapper",
+	realBinary: string | undefined,
+	agentArgs: string[],
+): Pick<PreparedAgentLaunch, "binary" | "args"> {
+	if (!realBinary) {
+		return {
+			args: agentArgs,
+		};
+	}
+	const commandParts = buildKanbanCommandParts([
+		"hooks",
+		wrapperCommand,
+		"--real-binary",
+		realBinary,
+		"--",
+		...agentArgs,
+	]);
+	return {
+		binary: commandParts[0],
+		args: commandParts.slice(1),
+	};
+}
+
 function hasCliOption(args: string[], optionName: string): boolean {
 	for (let i = 0; i < args.length; i += 1) {
 		const arg = args[i];
@@ -131,6 +155,21 @@ function hasCliOption(args: string[], optionName: string): boolean {
 
 function hasAnyCliOption(args: string[], optionNames: string[]): boolean {
 	return optionNames.some((optionName) => hasCliOption(args, optionName));
+}
+
+function removeCliOption(args: string[], optionName: string, takesValue: boolean): void {
+	for (let index = 0; index < args.length; index += 1) {
+		const arg = args[index];
+		if (arg === optionName) {
+			args.splice(index, takesValue ? 2 : 1);
+			index -= 1;
+			continue;
+		}
+		if (takesValue && arg.startsWith(`${optionName}=`)) {
+			args.splice(index, 1);
+			index -= 1;
+		}
+	}
 }
 
 function getRequiredResumeSessionId(input: AgentAdapterLaunchInput, agentLabel: string): string {
@@ -613,8 +652,12 @@ function withPrompt(args: string[], prompt: string, mode: "append" | "flag", fla
 	};
 }
 
+function toBracketedPaste(command: string): string {
+	return `\u001b[200~${command}\u001b[201~`;
+}
+
 function toBracketedPasteSubmission(command: string): string {
-	return `\u001b[200~${command}\u001b[201~\r`;
+	return `${toBracketedPaste(command)}\r`;
 }
 
 function buildSoftPlanPrompt(prompt: string): string {
@@ -853,9 +896,9 @@ const codexAdapter: AgentSessionAdapter = {
 		}
 
 		if (hooks) {
+			const wrappedLaunch = buildAgentWrapperLaunch("codex-wrapper", binary, codexArgs);
 			return {
-				binary,
-				args: codexArgs,
+				...wrappedLaunch,
 				env,
 				deferredStartupInput,
 				detectOutputTransition: codexPromptDetector,
@@ -1440,12 +1483,28 @@ const hermesAdapter: AgentSessionAdapter = {
 		const isHomeSession = isHomeAgentSessionId(input.taskId);
 		let deferredStartupInput: string | undefined;
 		const shouldResumeExistingSession = input.resumeFromTrash || input.resumeExistingSession;
+		const workspaceId = input.workspaceId?.trim();
 
 		if (input.autonomousModeEnabled && !hasCliOption(args, "--yolo")) {
 			args.push("--yolo");
 		}
 
-		if (!hasCliOption(args, "--source")) {
+		if (!isHomeSession && workspaceId) {
+			removeCliOption(args, "--source", true);
+			removeCliOption(args, "--quiet", false);
+			removeCliOption(args, "-Q", false);
+			args.push("--source", `kanban:${workspaceId}:${input.taskId}`);
+			if (!hasCliOption(args, "--tui")) {
+				args.push("--tui");
+			}
+			Object.assign(
+				env,
+				createHookRuntimeEnv({
+					taskId: input.taskId,
+					workspaceId,
+				}),
+			);
+		} else if (!hasCliOption(args, "--source")) {
 			args.push("--source", "tool");
 		}
 
@@ -1460,10 +1519,6 @@ const hermesAdapter: AgentSessionAdapter = {
 			};
 		}
 
-		if (!hasCliOption(args, "--quiet") && !hasCliOption(args, "-Q")) {
-			args.push("--quiet");
-		}
-
 		if (shouldResumeExistingSession && !hasAnyCliOption(args, ["--resume", "-r"])) {
 			args.push("--resume", getRequiredResumeSessionId(input, "Hermes"));
 		}
@@ -1472,12 +1527,14 @@ const hermesAdapter: AgentSessionAdapter = {
 			const prompt = input.startInPlanMode ? buildSoftPlanPrompt(input.prompt) : input.prompt;
 			const trimmedPrompt = prompt.trim();
 			if (trimmedPrompt) {
-				deferredStartupInput = toBracketedPasteSubmission(trimmedPrompt);
+				deferredStartupInput = toBracketedPaste(trimmedPrompt);
 			}
 		}
 
+		const wrappedLaunch =
+			workspaceId && !isHomeSession ? buildAgentWrapperLaunch("hermes-wrapper", input.binary, args) : { args };
 		return {
-			args,
+			...wrappedLaunch,
 			env,
 			deferredStartupInput,
 			detectOutputTransition: hermesPromptDetector,

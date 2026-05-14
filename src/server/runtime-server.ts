@@ -15,6 +15,7 @@ import type {
 	RuntimeBoardColumnId,
 	RuntimeCommandRunResponse,
 	RuntimeRunUpdateResponse,
+	RuntimeTaskSessionSummary,
 	RuntimeUpdateStatusResponse,
 	RuntimeWorkspaceStateResponse,
 } from "../core/api-contract";
@@ -38,6 +39,7 @@ import {
 	validatePasscode,
 	validateSession,
 } from "../security/passcode-manager";
+import { loadAgentSessionRegistration } from "../state/agent-session-registration";
 import {
 	loadWorkspaceContextById,
 	loadWorkspaceSessionRecoveryRecord,
@@ -60,6 +62,21 @@ import type { WorkspaceRegistry } from "./workspace-registry";
 interface DisposeTrackedWorkspaceResult {
 	terminalManager: TerminalSessionManager | null;
 	workspacePath: string | null;
+}
+
+const AGENT_SESSION_REGISTRATION_FRESH_WINDOW_MS = 10_000;
+
+function shouldRecoverTerminalSummary(summary: RuntimeTaskSessionSummary | null): boolean {
+	if (!summary) {
+		return true;
+	}
+	if (summary.state === "running") {
+		return true;
+	}
+	return (
+		summary.state === "awaiting_review" &&
+		(summary.reviewReason === "hook" || summary.reviewReason === "attention" || summary.reviewReason === "error")
+	);
 }
 
 export interface CreateRuntimeServerDependencies {
@@ -186,14 +203,34 @@ export async function createRuntimeServer(deps: CreateRuntimeServerDependencies)
 			if (terminalManager.hasActiveSession(taskId)) {
 				return;
 			}
-			const recoveryRecord = await loadWorkspaceSessionRecoveryRecord(workspaceId, taskId);
-			if (!recoveryRecord) {
-				terminalManager.recoverStaleSession(taskId);
-				return;
-			}
 			const workspaceState = await loadWorkspaceState(workspaceContext.repoPath);
 			const taskLocation = findTaskCardInBoard(workspaceState.board, taskId);
 			if (!taskLocation || (taskLocation.columnId !== "in_progress" && taskLocation.columnId !== "review")) {
+				terminalManager.recoverStaleSession(taskId);
+				return;
+			}
+			let recoveryRecord = await loadWorkspaceSessionRecoveryRecord(workspaceId, taskId);
+			if (!recoveryRecord) {
+				const summary = terminalManager.getSummary(taskId);
+				const registration = await loadAgentSessionRegistration(workspaceId, taskId);
+				const isFreshForSummary =
+					!summary?.startedAt ||
+					registration === null ||
+					registration.updatedAt >= summary.startedAt - AGENT_SESSION_REGISTRATION_FRESH_WINDOW_MS;
+				if (registration && shouldRecoverTerminalSummary(summary) && isFreshForSummary) {
+					recoveryRecord = {
+						taskId,
+						agentId: registration.agentId,
+						agentSessionId: registration.agentSessionId,
+						workspacePath: registration.workspacePath,
+						lastKnownState: summary?.state ?? "running",
+						reviewReason: summary?.reviewReason ?? null,
+						startedAt: summary?.startedAt ?? registration.startedAt,
+						updatedAt: registration.updatedAt,
+					};
+				}
+			}
+			if (!recoveryRecord) {
 				terminalManager.recoverStaleSession(taskId);
 				return;
 			}

@@ -34,6 +34,7 @@ interface CodexEventPayload {
 	message?: unknown;
 	command?: unknown;
 	item?: unknown;
+	payload?: unknown;
 }
 
 interface CodexSessionLogLine {
@@ -58,6 +59,7 @@ export interface CodexSessionWatcherOptions {
 	cwd?: string;
 	sessionsRoot?: string;
 	rolloutPollIntervalMs?: number;
+	onSessionId?: (sessionId: string) => void | Promise<void>;
 }
 
 function normalizeWhitespace(value: string): string {
@@ -611,6 +613,27 @@ function isCodexDescendantSession(message: unknown): boolean {
 	return threadSpawn !== null;
 }
 
+function extractCodexRootSessionIdFromLine(line: string): string | null {
+	const parsed = parseCodexSessionLogLine(line);
+	if (!parsed) {
+		return null;
+	}
+	const message = parseCodexEventPayload(parsed);
+	if (!message) {
+		return null;
+	}
+	const type = getString(message.type).toLowerCase();
+	if (type !== "session_meta" || isCodexDescendantSession(message)) {
+		return null;
+	}
+	const messageRecord = asRecord(message);
+	if (!messageRecord) {
+		return null;
+	}
+	const payload = asRecord(message.payload);
+	return readStringField(messageRecord, "id") ?? (payload ? readStringField(payload, "id") : null);
+}
+
 export function createCodexWatcherState(): CodexWatcherState {
 	return {
 		lastTurnId: "",
@@ -949,6 +972,10 @@ export async function startCodexSessionWatcher(
 				const lines = combined.split(/\r?\n/);
 				state.remainder = lines.pop() ?? "";
 				for (const line of lines) {
+					const sessionId = options.onSessionId ? extractCodexRootSessionIdFromLine(line) : null;
+					if (sessionId) {
+						void options.onSessionId?.(sessionId);
+					}
 					const mapped = parseCodexEventLine(line, state);
 					if (mapped) {
 						notify(mapped);
@@ -979,6 +1006,10 @@ export async function startCodexSessionWatcher(
 			return;
 		}
 		state.remainder = "";
+		const sessionId = options.onSessionId ? extractCodexRootSessionIdFromLine(line) : null;
+		if (sessionId) {
+			void options.onSessionId?.(sessionId);
+		}
 		const mapped = parseCodexEventLine(line, state);
 		if (mapped) {
 			notify(mapped);

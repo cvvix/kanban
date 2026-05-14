@@ -12,17 +12,14 @@ import type {
 	RuntimeTaskSessionSummary,
 	RuntimeTaskTurnCheckpoint,
 } from "../core/api-contract";
+import { loadAgentSessionRegistration } from "../state/agent-session-registration";
 import {
 	type AgentAdapterLaunchInput,
 	type AgentOutputTransitionDetector,
 	type AgentOutputTransitionInspectionPredicate,
 	prepareAgentLaunch,
 } from "./agent-session-adapters";
-import {
-	extractAgentSessionIdFromOutput,
-	resolveCodexSessionIdForCwd,
-	resolveHermesSessionIdForPrompt,
-} from "./agent-session-id";
+import { extractAgentSessionIdFromOutput } from "./agent-session-id";
 import {
 	hasClaudeWorkspaceTrustPrompt,
 	shouldAutoConfirmClaudeWorkspaceTrust,
@@ -47,8 +44,10 @@ const MAX_WORKSPACE_TRUST_BUFFER_CHARS = 16_384;
 const MAX_AGENT_SESSION_ID_OUTPUT_BUFFER_CHARS = 64 * 1024;
 const AUTO_RESTART_WINDOW_MS = 5_000;
 const MAX_AUTO_RESTARTS_PER_WINDOW = 3;
-const CODEX_SESSION_ID_PROBE_INTERVAL_MS = 2_000;
-const MAX_CODEX_SESSION_ID_PROBE_ATTEMPTS = 5;
+const AGENT_SESSION_REGISTRATION_PROBE_INTERVAL_MS = 500;
+const MAX_AGENT_SESSION_REGISTRATION_PROBE_ATTEMPTS = 120;
+const AGENT_SESSION_REGISTRATION_FRESH_WINDOW_MS = 10_000;
+const HERMES_DEFERRED_STARTUP_SUBMIT_DELAY_MS = 100;
 // TUI apps (Codex, OpenCode) can query OSC 10/11 before the browser terminal is attached
 // and ready to answer. We intercept those startup probes during early PTY output, synthesize
 // foreground/background color replies, then disable the filter once a live terminal listener
@@ -76,6 +75,7 @@ interface ActiveProcessState {
 	autoConfirmedWorkspaceTrust: boolean;
 	workspaceTrustConfirmTimer: NodeJS.Timeout | null;
 	agentSessionIdProbeTimer: NodeJS.Timeout | null;
+	hermesDeferredStartupSubmitTimer: NodeJS.Timeout | null;
 	agentSessionIdOutputDecoder: StringDecoder | null;
 	agentSessionIdOutputBuffer: string;
 }
@@ -207,9 +207,17 @@ function stopAgentSessionIdProbeTimer(active: ActiveProcessState): void {
 	}
 }
 
+function stopHermesDeferredStartupSubmitTimer(active: ActiveProcessState): void {
+	if (active.hermesDeferredStartupSubmitTimer) {
+		clearTimeout(active.hermesDeferredStartupSubmitTimer);
+		active.hermesDeferredStartupSubmitTimer = null;
+	}
+}
+
 function stopActiveProcessTimers(active: ActiveProcessState): void {
 	stopWorkspaceTrustTimers(active);
 	stopAgentSessionIdProbeTimer(active);
+	stopHermesDeferredStartupSubmitTimer(active);
 }
 
 function cloneStartTaskSessionRequest(request: StartTaskSessionRequest): StartTaskSessionRequest {
@@ -305,6 +313,27 @@ export class TerminalSessionManager implements TerminalSessionService {
 		return true;
 	}
 
+	private sendDeferredHermesStartupInput(entry: SessionEntry): void {
+		const active = entry.active;
+		if (!active || entry.summary.agentId !== "hermes" || active.deferredStartupInput === null) {
+			return;
+		}
+		const deferredInput = active.deferredStartupInput;
+		active.deferredStartupInput = null;
+		active.suppressNextHermesPromptReview = true;
+		active.session.write(deferredInput);
+		stopHermesDeferredStartupSubmitTimer(active);
+		const timer = setTimeout(() => {
+			if (entry.active !== active || entry.summary.agentId !== "hermes") {
+				return;
+			}
+			active.hermesDeferredStartupSubmitTimer = null;
+			active.session.write("\r");
+		}, HERMES_DEFERRED_STARTUP_SUBMIT_DELAY_MS);
+		timer.unref?.();
+		active.hermesDeferredStartupSubmitTimer = timer;
+	}
+
 	private hasLiveOutputListener(entry: SessionEntry): boolean {
 		for (const listener of entry.listeners.values()) {
 			if (listener.onOutput) {
@@ -389,58 +418,39 @@ export class TerminalSessionManager implements TerminalSessionService {
 		}
 	}
 
-	private startCodexSessionIdProbe(entry: SessionEntry, cwd: string, startedAt: number): void {
-		if (!entry.active || entry.summary.agentId !== "codex" || entry.summary.agentSessionId) {
-			return;
+	private async resolveRegisteredAgentSessionId(
+		request: Pick<StartTaskSessionRequest, "agentId" | "taskId" | "workspaceId">,
+		startedAt: number,
+	): Promise<string | null> {
+		if ((request.agentId !== "codex" && request.agentId !== "hermes") || !request.workspaceId) {
+			return null;
 		}
-		let isResolving = false;
-		let attempts = 0;
-		const timer = setInterval(() => {
-			if (!entry.active || entry.summary.agentId !== "codex" || entry.summary.agentSessionId) {
-				if (entry.active) {
-					stopAgentSessionIdProbeTimer(entry.active);
-				} else {
-					clearInterval(timer);
-				}
-				return;
-			}
-			if (isResolving) {
-				return;
-			}
-			attempts += 1;
-			isResolving = true;
-			resolveCodexSessionIdForCwd(cwd, startedAt)
-				.then((sessionId) => {
-					if (sessionId) {
-						this.recordAgentSessionId(entry, sessionId);
-						if (entry.active) {
-							stopAgentSessionIdProbeTimer(entry.active);
-						}
-					} else if (attempts >= MAX_CODEX_SESSION_ID_PROBE_ATTEMPTS && entry.active) {
-						stopAgentSessionIdProbeTimer(entry.active);
-					}
-				})
-				.catch(() => {
-					if (attempts >= MAX_CODEX_SESSION_ID_PROBE_ATTEMPTS && entry.active) {
-						stopAgentSessionIdProbeTimer(entry.active);
-					}
-				})
-				.finally(() => {
-					isResolving = false;
-				});
-		}, CODEX_SESSION_ID_PROBE_INTERVAL_MS);
-		timer.unref?.();
-		entry.active.agentSessionIdProbeTimer = timer;
+		const record = await loadAgentSessionRegistration(request.workspaceId, request.taskId, request.agentId);
+		if (!record) {
+			return null;
+		}
+		if (record.updatedAt < startedAt - AGENT_SESSION_REGISTRATION_FRESH_WINDOW_MS) {
+			return null;
+		}
+		return normalizeStoredSessionId(record.agentSessionId);
 	}
 
-	private startHermesSessionIdProbe(entry: SessionEntry, prompt: string, startedAt: number): void {
-		if (!entry.active || entry.summary.agentId !== "hermes" || entry.summary.agentSessionId) {
+	private startAgentSessionRegistrationProbe(
+		entry: SessionEntry,
+		request: Pick<StartTaskSessionRequest, "agentId" | "taskId" | "workspaceId">,
+		startedAt: number,
+	): void {
+		if (
+			!entry.active ||
+			entry.summary.agentSessionId ||
+			(request.agentId !== "codex" && request.agentId !== "hermes")
+		) {
 			return;
 		}
 		let isResolving = false;
 		let attempts = 0;
 		const timer = setInterval(() => {
-			if (!entry.active || entry.summary.agentId !== "hermes" || entry.summary.agentSessionId) {
+			if (!entry.active || entry.summary.agentId !== request.agentId || entry.summary.agentSessionId) {
 				if (entry.active) {
 					stopAgentSessionIdProbeTimer(entry.active);
 				} else {
@@ -453,26 +463,26 @@ export class TerminalSessionManager implements TerminalSessionService {
 			}
 			attempts += 1;
 			isResolving = true;
-			resolveHermesSessionIdForPrompt(prompt, startedAt)
+			this.resolveRegisteredAgentSessionId(request, startedAt)
 				.then((sessionId) => {
 					if (sessionId) {
 						this.recordAgentSessionId(entry, sessionId);
 						if (entry.active) {
 							stopAgentSessionIdProbeTimer(entry.active);
 						}
-					} else if (attempts >= 20 && entry.active) {
+					} else if (attempts >= MAX_AGENT_SESSION_REGISTRATION_PROBE_ATTEMPTS && entry.active) {
 						stopAgentSessionIdProbeTimer(entry.active);
 					}
 				})
 				.catch(() => {
-					if (attempts >= 20 && entry.active) {
+					if (attempts >= MAX_AGENT_SESSION_REGISTRATION_PROBE_ATTEMPTS && entry.active) {
 						stopAgentSessionIdProbeTimer(entry.active);
 					}
 				})
 				.finally(() => {
 					isResolving = false;
 				});
-		}, 500);
+		}, AGENT_SESSION_REGISTRATION_PROBE_INTERVAL_MS);
 		timer.unref?.();
 		entry.active.agentSessionIdProbeTimer = timer;
 	}
@@ -694,10 +704,7 @@ export class TerminalSessionManager implements TerminalSessionService {
 							if (entry.summary.agentId === "codex") {
 								this.trySendDeferredCodexStartupInput(request.taskId);
 							} else {
-								const deferredInput = entry.active.deferredStartupInput;
-								entry.active.deferredStartupInput = null;
-								entry.active.suppressNextHermesPromptReview = true;
-								entry.active.session.write(deferredInput);
+								this.sendDeferredHermesStartupInput(entry);
 							}
 						}
 					}
@@ -820,6 +827,7 @@ export class TerminalSessionManager implements TerminalSessionService {
 			autoConfirmedWorkspaceTrust: false,
 			workspaceTrustConfirmTimer: null,
 			agentSessionIdProbeTimer: null,
+			hermesDeferredStartupSubmitTimer: null,
 			agentSessionIdOutputDecoder:
 				supportsPersistentAgentSessionId(request.agentId) && !launchAgentSessionId
 					? new StringDecoder("utf8")
@@ -847,8 +855,15 @@ export class TerminalSessionManager implements TerminalSessionService {
 			latestTurnCheckpoint: null,
 			previousTurnCheckpoint: null,
 		});
-		this.startCodexSessionIdProbe(entry, request.cwd, startedAt);
-		this.startHermesSessionIdProbe(entry, request.prompt, startedAt);
+		this.startAgentSessionRegistrationProbe(
+			entry,
+			{
+				agentId: request.agentId,
+				taskId: request.taskId,
+				workspaceId: request.workspaceId,
+			},
+			startedAt,
+		);
 		this.emitSummary(entry.summary);
 
 		return cloneSummary(entry.summary);
@@ -986,6 +1001,7 @@ export class TerminalSessionManager implements TerminalSessionService {
 			autoConfirmedWorkspaceTrust: false,
 			workspaceTrustConfirmTimer: null,
 			agentSessionIdProbeTimer: null,
+			hermesDeferredStartupSubmitTimer: null,
 			agentSessionIdOutputDecoder: null,
 			agentSessionIdOutputBuffer: "",
 		};
@@ -1340,12 +1356,12 @@ export class TerminalSessionManager implements TerminalSessionService {
 			try {
 				const nextRequest = cloneStartTaskSessionRequest(restartRequest.request);
 				if (
-					nextRequest.agentId === "hermes" &&
+					(nextRequest.agentId === "codex" || nextRequest.agentId === "hermes") &&
 					!normalizeStoredSessionId(entry.summary.agentSessionId) &&
 					!normalizeStoredSessionId(nextRequest.agentSessionId)
 				) {
-					const sessionId = await resolveHermesSessionIdForPrompt(
-						nextRequest.prompt,
+					const sessionId = await this.resolveRegisteredAgentSessionId(
+						nextRequest,
 						entry.summary.startedAt ?? now(),
 					);
 					if (sessionId) {

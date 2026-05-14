@@ -29,6 +29,37 @@ function createRolloutLine(line: Record<string, unknown>, includeTrailingNewline
 }
 
 describe("startCodexSessionWatcher", () => {
+	it("reports root session ids from session_meta lines", async () => {
+		const tempDir = await mkdtemp(join(tmpdir(), "kanban-codex-watcher-"));
+		const logPath = join(tempDir, "session.jsonl");
+		const sessionIds: string[] = [];
+		const stopWatcher = await startCodexSessionWatcher(logPath, () => {}, 60_000, {
+			onSessionId: (sessionId) => {
+				sessionIds.push(sessionId);
+			},
+		});
+
+		try {
+			await writeFile(
+				logPath,
+				createCodexLogLine(
+					{
+						type: "session_meta",
+						id: "22222222-2222-4222-8222-222222222222",
+					},
+					false,
+				),
+				"utf8",
+			);
+
+			await stopWatcher();
+		} finally {
+			await rm(tempDir, { recursive: true, force: true });
+		}
+
+		expect(sessionIds).toEqual(["22222222-2222-4222-8222-222222222222"]);
+	});
+
 	it("flushes completion events on stop even when the log file appears late", async () => {
 		const tempDir = await mkdtemp(join(tmpdir(), "kanban-codex-watcher-"));
 		const logPath = join(tempDir, "session.jsonl");
