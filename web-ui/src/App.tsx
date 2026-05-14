@@ -10,7 +10,7 @@ import { notifyError, showAppToast } from "@/components/app-toaster";
 import { CardDetailView } from "@/components/card-detail-view";
 import { ClearTrashDialog } from "@/components/clear-trash-dialog";
 import { DebugDialog } from "@/components/debug-dialog";
-import { AgentTerminalPanel } from "@/components/detail-panels/agent-terminal-panel";
+import { AgentTerminalPanel, type AgentTerminalPanelTab } from "@/components/detail-panels/agent-terminal-panel";
 import { GitHistoryView } from "@/components/git-history-view";
 import { KanbanBoard } from "@/components/kanban-board";
 import { ProjectNavigationPanel } from "@/components/project-navigation-panel";
@@ -53,7 +53,7 @@ import { useTaskBranchOptions } from "@/hooks/use-task-branch-options";
 import { useTaskEditor } from "@/hooks/use-task-editor";
 import { useTaskSessions } from "@/hooks/use-task-sessions";
 import { useTaskStartActions } from "@/hooks/use-task-start-actions";
-import { useTerminalPanels } from "@/hooks/use-terminal-panels";
+import { type TerminalPanelTab, useTerminalPanels } from "@/hooks/use-terminal-panels";
 import { useWorkspaceSync } from "@/hooks/use-workspace-sync";
 import { LayoutCustomizationsProvider } from "@/resize/layout-customizations";
 import { ResizableBottomPane } from "@/resize/resizable-bottom-pane";
@@ -78,6 +78,31 @@ import {
 } from "@/stores/workspace-metadata-store";
 import { useTerminalThemeColors } from "@/terminal/theme-colors";
 import type { BoardData } from "@/types";
+import { splitServerPath } from "@/utils/server-path";
+
+function buildTerminalTabFullTitle(title: string, subtitle: string | null | undefined, ordinal: number): string {
+	const label = ordinal === 1 ? title : `${title} ${ordinal}`;
+	return subtitle ? `${label} ${subtitle}` : label;
+}
+
+function buildTerminalTabTitle(title: string, subtitle: string | null | undefined, ordinal: number): string {
+	const normalizedSubtitle = subtitle?.trim();
+	const segments = normalizedSubtitle ? splitServerPath(normalizedSubtitle) : [];
+	const directoryName = segments.at(-1) ?? normalizedSubtitle ?? title;
+	return `${directoryName}(${ordinal})`;
+}
+
+function createTerminalPanelTabs(
+	tabs: TerminalPanelTab[],
+	title: string,
+	subtitle: string | null | undefined,
+): AgentTerminalPanelTab[] {
+	return tabs.map((tab) => ({
+		fullTitle: buildTerminalTabFullTitle(title, subtitle, tab.ordinal),
+		id: tab.taskId,
+		title: buildTerminalTabTitle(title, subtitle, tab.ordinal),
+	}));
+}
 
 export default function App(): ReactElement {
 	const terminalThemeColors = useTerminalThemeColors();
@@ -397,11 +422,13 @@ export default function App(): ReactElement {
 	const agentCommand = runtimeProjectConfig?.effectiveCommand ?? null;
 	const {
 		homeTerminalTaskId,
+		homeTerminalTabs,
 		isHomeTerminalOpen,
 		isHomeTerminalStarting,
 		homeTerminalPaneHeight,
 		isDetailTerminalOpen,
 		detailTerminalTaskId,
+		detailTerminalTabs,
 		isDetailTerminalStarting,
 		detailTerminalPaneHeight,
 		isHomeTerminalExpanded,
@@ -412,6 +439,12 @@ export default function App(): ReactElement {
 		handleToggleExpandDetailTerminal,
 		handleToggleHomeTerminal,
 		handleToggleDetailTerminal,
+		handleSelectHomeTerminalTab,
+		handleSelectDetailTerminalTab,
+		handleAddHomeTerminalTab,
+		handleAddDetailTerminalTab,
+		handleCloseHomeTerminalTab,
+		handleCloseDetailTerminalTab,
 		handleSendAgentCommandToHomeTerminal,
 		handleSendAgentCommandToDetailTerminal,
 		prepareTerminalForShortcut,
@@ -428,6 +461,7 @@ export default function App(): ReactElement {
 		agentCommand,
 		upsertSession,
 		sendTaskSessionInput,
+		stopTaskSession,
 	});
 	const homeTerminalSummary = sessions[homeTerminalTaskId] ?? null;
 	const homeSidebarAgentPanel = useHomeSidebarAgentPanel({
@@ -544,6 +578,10 @@ export default function App(): ReactElement {
 		() => workspacePath ?? navigationProjectPath ?? null,
 		[navigationProjectPath, workspacePath],
 	);
+	const homeTerminalPanelTabs = useMemo(
+		() => createTerminalPanelTabs(homeTerminalTabs, "Terminal", homeTerminalSubtitle),
+		[homeTerminalSubtitle, homeTerminalTabs],
+	);
 
 	const handleOpenSettings = useCallback((section?: RuntimeSettingsSection) => {
 		setSettingsInitialSection(section ?? null);
@@ -658,6 +696,10 @@ export default function App(): ReactElement {
 			null
 		);
 	}, [selectedCard]);
+	const detailTerminalPanelTabs = useMemo(
+		() => createTerminalPanelTabs(detailTerminalTabs, "Terminal", detailTerminalSubtitle),
+		[detailTerminalSubtitle, detailTerminalTabs],
+	);
 
 	const runtimeHint = useMemo(() => {
 		return getTaskAgentNavbarHint(runtimeProjectConfig, {
@@ -1001,6 +1043,11 @@ export default function App(): ReactElement {
 													onSendAgentCommand={handleSendAgentCommandToHomeTerminal}
 													isExpanded={isHomeTerminalExpanded}
 													onToggleExpand={handleToggleExpandHomeTerminal}
+													terminalTabs={homeTerminalPanelTabs}
+													activeTerminalTabId={homeTerminalTaskId}
+													onSelectTerminalTab={handleSelectHomeTerminalTab}
+													onAddTerminalTab={handleAddHomeTerminalTab}
+													onCloseTerminalTab={handleCloseHomeTerminalTab}
 												/>
 											</div>
 										</ResizableBottomPane>
@@ -1076,6 +1123,11 @@ export default function App(): ReactElement {
 									onBottomTerminalSendAgentCommand={handleSendAgentCommandToDetailTerminal}
 									isBottomTerminalExpanded={isDetailTerminalExpanded}
 									onBottomTerminalToggleExpand={handleToggleExpandDetailTerminal}
+									bottomTerminalTabs={detailTerminalPanelTabs}
+									activeBottomTerminalTabId={detailTerminalTaskId}
+									onBottomTerminalTabSelect={handleSelectDetailTerminalTab}
+									onBottomTerminalTabAdd={handleAddDetailTerminalTab}
+									onBottomTerminalTabClose={handleCloseDetailTerminalTab}
 									isDocumentVisible={isDocumentVisible}
 									onClineSettingsSaved={refreshRuntimeProjectConfig}
 									onTaskClineSettingsChanged={handleClineTaskSettingsChangedForTask}

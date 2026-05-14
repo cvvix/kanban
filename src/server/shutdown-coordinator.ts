@@ -162,6 +162,9 @@ function collectWorkColumnTaskIds(workspaceState: RuntimeWorkspaceStateResponse)
 
 export async function shutdownRuntimeServer(deps: RuntimeShutdownCoordinatorDependencies): Promise<void> {
 	if (deps.skipSessionCleanup) {
+		for (const { terminalManager } of deps.workspaceRegistry.listManagedWorkspaces()) {
+			terminalManager.markInterruptedAndStopAll();
+		}
 		await deps.closeRuntimeServer();
 		return;
 	}

@@ -19,6 +19,21 @@ const originalCOMSPEC = process.env.COMSPEC;
 const originalPath = process.env.PATH;
 const originalPathExt = process.env.PATHEXT;
 
+interface MockPtyProcess {
+	pid: number;
+	onData: ReturnType<typeof vi.fn>;
+	onExit: ReturnType<typeof vi.fn>;
+	kill: ReturnType<typeof vi.fn>;
+	write: ReturnType<typeof vi.fn>;
+	resize: ReturnType<typeof vi.fn>;
+	pause: ReturnType<typeof vi.fn>;
+	resume: ReturnType<typeof vi.fn>;
+	emitData: (data: string | Buffer | Uint8Array) => void;
+	emitExit: (event: { exitCode: number; signal?: number }) => void;
+}
+
+const mockPtyProcesses: MockPtyProcess[] = [];
+
 function setPlatform(value: NodeJS.Platform): void {
 	Object.defineProperty(process, "platform", {
 		value,
@@ -26,13 +41,14 @@ function setPlatform(value: NodeJS.Platform): void {
 	});
 }
 
-function createMockPtyProcess() {
+function createMockPtyProcess(): MockPtyProcess {
+	let hasExited = false;
 	const listeners: {
 		onData?: (data: string | Buffer | Uint8Array) => void;
 		onExit?: (event: { exitCode: number; signal?: number }) => void;
 	} = {};
 
-	return {
+	const ptyProcess = {
 		pid: 4242,
 		onData: vi.fn((listener: (data: string | Buffer | Uint8Array) => void) => {
 			listeners.onData = listener;
@@ -49,9 +65,15 @@ function createMockPtyProcess() {
 			listeners.onData?.(data);
 		},
 		emitExit: (event: { exitCode: number; signal?: number }) => {
+			if (hasExited) {
+				return;
+			}
+			hasExited = true;
 			listeners.onExit?.(event);
 		},
 	};
+	mockPtyProcesses.push(ptyProcess);
+	return ptyProcess;
 }
 
 describe("PtySession", () => {
@@ -81,6 +103,9 @@ describe("PtySession", () => {
 	});
 
 	afterEach(() => {
+		for (const ptyProcess of mockPtyProcesses.splice(0)) {
+			ptyProcess.emitExit({ exitCode: 0 });
+		}
 		setPlatform(originalPlatform);
 	});
 
@@ -199,6 +224,31 @@ describe("PtySession", () => {
 
 		expect(ptyMocks.spawn).toHaveBeenCalledTimes(1);
 		expect(ptyMocks.spawn.mock.calls[0]?.[0]).toBe("codex");
+	});
+
+	it("terminates the pty process group when stopped outside Windows", () => {
+		setPlatform("darwin");
+		const processKillSpy = vi.spyOn(process, "kill").mockImplementation(() => true);
+		const ptyProcess = createMockPtyProcess();
+		ptyMocks.spawn.mockReturnValue(ptyProcess);
+
+		try {
+			const session = PtySession.spawn({
+				binary: "codex",
+				args: [],
+				cwd: "/tmp",
+				cols: 120,
+				rows: 40,
+			});
+
+			session.stop();
+			ptyProcess.emitExit({ exitCode: 0 });
+
+			expect(processKillSpy).toHaveBeenCalledWith(-4242, "SIGTERM");
+			expect(ptyProcess.kill).toHaveBeenCalledTimes(1);
+		} finally {
+			processKillSpy.mockRestore();
+		}
 	});
 
 	it("does not wrap cmd itself on Windows", () => {

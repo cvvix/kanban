@@ -3,7 +3,7 @@ import { Files, GitCompareArrows, Maximize2, MessageSquare, Minimize2, X } from 
 import type { MouseEvent as ReactMouseEvent, ReactNode } from "react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useHotkeys } from "react-hotkeys-hook";
-import { AgentTerminalPanel } from "@/components/detail-panels/agent-terminal-panel";
+import { AgentTerminalPanel, type AgentTerminalPanelTab } from "@/components/detail-panels/agent-terminal-panel";
 import { ClineAgentChatPanel, type ClineAgentChatPanelHandle } from "@/components/detail-panels/cline-agent-chat-panel";
 import { ColumnContextPanel } from "@/components/detail-panels/column-context-panel";
 import { type DiffLineComment, DiffViewerPanel } from "@/components/detail-panels/diff-viewer-panel";
@@ -131,6 +131,11 @@ function BottomTerminalSection({
 	onCollapse,
 	isExpanded,
 	onToggleExpand,
+	tabs,
+	activeTabId,
+	onTabSelect,
+	onTabAdd,
+	onTabClose,
 }: {
 	taskId: string;
 	workspaceId: string | null;
@@ -147,6 +152,11 @@ function BottomTerminalSection({
 	onCollapse?: () => void;
 	isExpanded?: boolean;
 	onToggleExpand?: () => void;
+	tabs?: AgentTerminalPanelTab[];
+	activeTabId?: string | null;
+	onTabSelect?: (tabId: string) => void;
+	onTabAdd?: () => void;
+	onTabClose?: (tabId: string) => void;
 }): React.ReactElement {
 	return (
 		<ResizableBottomPane
@@ -175,6 +185,11 @@ function BottomTerminalSection({
 					onSendAgentCommand={onSendAgentCommand}
 					isExpanded={isExpanded}
 					onToggleExpand={onToggleExpand}
+					terminalTabs={tabs}
+					activeTerminalTabId={activeTabId}
+					onSelectTerminalTab={onTabSelect}
+					onAddTerminalTab={onTabAdd}
+					onCloseTerminalTab={onTabClose}
 				/>
 			</div>
 		</ResizableBottomPane>
@@ -364,6 +379,11 @@ export function CardDetailView({
 	onBottomTerminalSendAgentCommand,
 	isBottomTerminalExpanded,
 	onBottomTerminalToggleExpand,
+	bottomTerminalTabs,
+	activeBottomTerminalTabId,
+	onBottomTerminalTabSelect,
+	onBottomTerminalTabAdd,
+	onBottomTerminalTabClose,
 	isDocumentVisible = true,
 	onClineSettingsSaved,
 	onTaskClineSettingsChanged,
@@ -427,6 +447,11 @@ export function CardDetailView({
 	onBottomTerminalSendAgentCommand?: () => void;
 	isBottomTerminalExpanded?: boolean;
 	onBottomTerminalToggleExpand?: () => void;
+	bottomTerminalTabs?: AgentTerminalPanelTab[];
+	activeBottomTerminalTabId?: string | null;
+	onBottomTerminalTabSelect?: (tabId: string) => void;
+	onBottomTerminalTabAdd?: () => void;
+	onBottomTerminalTabClose?: (tabId: string) => void;
 	isDocumentVisible?: boolean;
 	onClineSettingsSaved?: () => void;
 	onTaskClineSettingsChanged?: (settings: {
@@ -788,6 +813,11 @@ export function CardDetailView({
 								onCollapse={onBottomTerminalCollapse}
 								isExpanded={isBottomTerminalExpanded}
 								onToggleExpand={onBottomTerminalToggleExpand}
+								tabs={bottomTerminalTabs}
+								activeTabId={activeBottomTerminalTabId}
+								onTabSelect={onBottomTerminalTabSelect}
+								onTabAdd={onBottomTerminalTabAdd}
+								onTabClose={onBottomTerminalTabClose}
 							/>
 						</div>
 					) : null}
@@ -939,6 +969,11 @@ export function CardDetailView({
 								onCollapse={onBottomTerminalCollapse}
 								isExpanded={isBottomTerminalExpanded}
 								onToggleExpand={onBottomTerminalToggleExpand}
+								tabs={bottomTerminalTabs}
+								activeTabId={activeBottomTerminalTabId}
+								onTabSelect={onBottomTerminalTabSelect}
+								onTabAdd={onBottomTerminalTabAdd}
+								onTabClose={onBottomTerminalTabClose}
 							/>
 						) : null}
 					</>

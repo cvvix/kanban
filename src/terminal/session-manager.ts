@@ -1243,29 +1243,32 @@ export class TerminalSessionManager implements TerminalSessionService {
 		if (!entry?.active) {
 			return entry ? cloneSummary(entry.summary) : null;
 		}
-		entry.suppressAutoRestartOnExit = true;
-		const cleanupFn = entry.active.onSessionCleanup;
-		entry.active.onSessionCleanup = null;
-		stopActiveProcessTimers(entry.active);
-		entry.active.session.stop();
-		if (cleanupFn) {
-			cleanupFn().catch(() => {
-				// Best effort: cleanup failure is non-critical.
-			});
-		}
+		this.stopActiveEntry(entry);
 		return cloneSummary(entry.summary);
 	}
 
 	markInterruptedAndStopAll(): RuntimeTaskSessionSummary[] {
 		const activeEntries = Array.from(this.entries.values()).filter((entry) => entry.active != null);
 		for (const entry of activeEntries) {
-			if (!entry.active) {
-				continue;
-			}
-			stopActiveProcessTimers(entry.active);
-			entry.active.session.stop({ interrupted: true });
+			this.stopActiveEntry(entry, { interrupted: true });
 		}
 		return activeEntries.map((entry) => cloneSummary(entry.summary));
+	}
+
+	private stopActiveEntry(entry: SessionEntry, options?: { interrupted?: boolean }): void {
+		if (!entry.active) {
+			return;
+		}
+		entry.suppressAutoRestartOnExit = true;
+		const cleanupFn = entry.active.onSessionCleanup;
+		entry.active.onSessionCleanup = null;
+		stopActiveProcessTimers(entry.active);
+		entry.active.session.stop({ interrupted: options?.interrupted });
+		if (cleanupFn) {
+			cleanupFn().catch(() => {
+				// Best effort: cleanup failure is non-critical.
+			});
+		}
 	}
 
 	private applySessionEvent(entry: SessionEntry, event: SessionTransitionEvent): RuntimeTaskSessionSummary {

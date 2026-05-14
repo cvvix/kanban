@@ -5,6 +5,7 @@ export enum LocalStorageKey {
 	AgentTipsDismissed = "kanban.agent-tips-dismissed",
 	TaskCreatePrimaryStartAction = "kanban.task-create-primary-start-action",
 	BottomTerminalPaneHeight = "kanban.bottom-terminal-pane-height",
+	TerminalPanelsState = "kanban.terminal-panels-state.v1",
 	DetailAgentPanelRatio = "kanban.detail-agent-panel-ratio",
 	DetailTaskCardsPanelRatio = "kanban.detail-task-cards-panel-ratio",
 	DetailDiffFileTreePanelRatio = "kanban.detail-diff-file-tree-panel-ratio",

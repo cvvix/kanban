@@ -2,7 +2,7 @@ import { spawnSync } from "node:child_process";
 import { mkdirSync } from "node:fs";
 import { join } from "node:path";
 
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import type { RuntimeBoardData, RuntimeTaskSessionSummary } from "../../src/core/api-contract";
 import { shutdownRuntimeServer } from "../../src/server/shutdown-coordinator";
@@ -95,6 +95,36 @@ function createSession(taskId: string, state: "running" | "awaiting_review" | "i
 }
 
 describe.sequential("shutdown coordinator integration", () => {
+	it("stops managed terminal sessions even when shutdown cleanup is skipped", async () => {
+		let didCloseRuntimeServer = false;
+		const markInterruptedAndStopAll = vi.fn(() => [createSession("managed-running", "running")]);
+		const managedTerminalManager = {
+			markInterruptedAndStopAll,
+			listSummaries: () => [createSession("managed-running", "running")],
+			getSummary: () => null,
+		} as unknown as TerminalSessionManager;
+
+		await shutdownRuntimeServer({
+			workspaceRegistry: {
+				listManagedWorkspaces: () => [
+					{
+						workspaceId: "managed-project",
+						workspacePath: "/tmp/managed-project",
+						terminalManager: managedTerminalManager,
+					},
+				],
+			},
+			warn: () => {},
+			closeRuntimeServer: async () => {
+				didCloseRuntimeServer = true;
+			},
+			skipSessionCleanup: true,
+		});
+
+		expect(markInterruptedAndStopAll).toHaveBeenCalledTimes(1);
+		expect(didCloseRuntimeServer).toBe(true);
+	});
+
 	it("moves all in-progress and review cards to trash for every indexed project on shutdown", async () => {
 		await withTemporaryHome(async () => {
 			const { path: sandboxRoot, cleanup } = createTempDir("kanban-shutdown-scope-");

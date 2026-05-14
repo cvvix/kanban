@@ -8,6 +8,8 @@ import { LocalStorageKey } from "@/storage/local-storage-store";
 import type { CardSelection } from "@/types";
 
 const startShellSessionMutateMock = vi.hoisted(() => vi.fn());
+const stopTaskSessionMock = vi.hoisted(() => vi.fn());
+const disposePersistentTerminalMock = vi.hoisted(() => vi.fn());
 
 vi.mock("@/runtime/trpc-client", () => ({
 	getRuntimeTrpcClient: () => ({
@@ -24,14 +26,28 @@ vi.mock("@/terminal/terminal-geometry-registry", () => ({
 	prepareWaitForTerminalGeometry: () => () => Promise.resolve(),
 }));
 
+vi.mock("@/terminal/persistent-terminal-manager", () => ({
+	disposePersistentTerminal: disposePersistentTerminalMock,
+}));
+
 interface HookSnapshot {
 	collapseDetailTerminal: ReturnType<typeof useTerminalPanels>["collapseDetailTerminal"];
 	collapseHomeTerminal: ReturnType<typeof useTerminalPanels>["collapseHomeTerminal"];
 	detailTerminalPaneHeight: number | undefined;
 	detailTerminalTaskId: string | null;
+	detailTerminalTabs: ReturnType<typeof useTerminalPanels>["detailTerminalTabs"];
+	handleAddDetailTerminalTab: ReturnType<typeof useTerminalPanels>["handleAddDetailTerminalTab"];
+	handleAddHomeTerminalTab: ReturnType<typeof useTerminalPanels>["handleAddHomeTerminalTab"];
+	handleCloseDetailTerminalTab: ReturnType<typeof useTerminalPanels>["handleCloseDetailTerminalTab"];
+	handleCloseHomeTerminalTab: ReturnType<typeof useTerminalPanels>["handleCloseHomeTerminalTab"];
+	handleSelectDetailTerminalTab: ReturnType<typeof useTerminalPanels>["handleSelectDetailTerminalTab"];
+	handleSelectHomeTerminalTab: ReturnType<typeof useTerminalPanels>["handleSelectHomeTerminalTab"];
 	handleToggleDetailTerminal: ReturnType<typeof useTerminalPanels>["handleToggleDetailTerminal"];
+	homeTerminalTaskId: string;
 	homeTerminalPaneHeight: number | undefined;
+	homeTerminalTabs: ReturnType<typeof useTerminalPanels>["homeTerminalTabs"];
 	isDetailTerminalOpen: boolean;
+	isHomeTerminalOpen: boolean;
 	resetBottomTerminalLayoutCustomizations: ReturnType<
 		typeof useTerminalPanels
 	>["resetBottomTerminalLayoutCustomizations"];
@@ -106,6 +122,9 @@ function HookHarness({
 		agentCommand: null,
 		upsertSession: () => {},
 		sendTaskSessionInput: async () => ({ ok: true }),
+		stopTaskSession: async (taskId: string) => {
+			stopTaskSessionMock(taskId);
+		},
 	});
 
 	useEffect(() => {
@@ -114,9 +133,19 @@ function HookHarness({
 			collapseHomeTerminal: result.collapseHomeTerminal,
 			detailTerminalPaneHeight: result.detailTerminalPaneHeight,
 			detailTerminalTaskId: result.detailTerminalTaskId,
+			detailTerminalTabs: result.detailTerminalTabs,
+			handleAddDetailTerminalTab: result.handleAddDetailTerminalTab,
+			handleAddHomeTerminalTab: result.handleAddHomeTerminalTab,
+			handleCloseDetailTerminalTab: result.handleCloseDetailTerminalTab,
+			handleCloseHomeTerminalTab: result.handleCloseHomeTerminalTab,
+			handleSelectDetailTerminalTab: result.handleSelectDetailTerminalTab,
+			handleSelectHomeTerminalTab: result.handleSelectHomeTerminalTab,
 			handleToggleDetailTerminal: result.handleToggleDetailTerminal,
+			homeTerminalTaskId: result.homeTerminalTaskId,
 			homeTerminalPaneHeight: result.homeTerminalPaneHeight,
+			homeTerminalTabs: result.homeTerminalTabs,
 			isDetailTerminalOpen: result.isDetailTerminalOpen,
+			isHomeTerminalOpen: result.isHomeTerminalOpen,
 			resetBottomTerminalLayoutCustomizations: result.resetBottomTerminalLayoutCustomizations,
 			setDetailTerminalPaneHeight: result.setDetailTerminalPaneHeight,
 			setHomeTerminalPaneHeight: result.setHomeTerminalPaneHeight,
@@ -127,9 +156,19 @@ function HookHarness({
 		result.collapseHomeTerminal,
 		result.detailTerminalPaneHeight,
 		result.detailTerminalTaskId,
+		result.detailTerminalTabs,
+		result.handleAddDetailTerminalTab,
+		result.handleAddHomeTerminalTab,
+		result.handleCloseDetailTerminalTab,
+		result.handleCloseHomeTerminalTab,
+		result.handleSelectDetailTerminalTab,
+		result.handleSelectHomeTerminalTab,
 		result.handleToggleDetailTerminal,
+		result.homeTerminalTaskId,
 		result.homeTerminalPaneHeight,
+		result.homeTerminalTabs,
 		result.isDetailTerminalOpen,
+		result.isHomeTerminalOpen,
 		result.resetBottomTerminalLayoutCustomizations,
 		result.setDetailTerminalPaneHeight,
 		result.setHomeTerminalPaneHeight,
@@ -146,6 +185,8 @@ describe("useTerminalPanels", () => {
 	beforeEach(() => {
 		window.localStorage.clear();
 		startShellSessionMutateMock.mockReset();
+		stopTaskSessionMock.mockReset();
+		disposePersistentTerminalMock.mockReset();
 		startShellSessionMutateMock.mockImplementation(async ({ taskId }: { taskId: string }) => ({
 			ok: true,
 			summary: createSummary(taskId),
@@ -246,6 +287,334 @@ describe("useTerminalPanels", () => {
 				workspaceTaskId: "task-a",
 			}),
 		);
+	});
+
+	it("creates and switches home terminal tabs", async () => {
+		let latestSnapshot: HookSnapshot | null = null;
+
+		await act(async () => {
+			root.render(
+				<HookHarness
+					selectedCard={null}
+					onSnapshot={(snapshot) => {
+						latestSnapshot = snapshot;
+					}}
+				/>,
+			);
+			await flushPromises();
+		});
+
+		expect(requireSnapshot(latestSnapshot).homeTerminalTaskId).toBe("__home_terminal__");
+		expect(requireSnapshot(latestSnapshot).homeTerminalTabs).toEqual([
+			{
+				taskId: "__home_terminal__",
+				ordinal: 1,
+			},
+		]);
+
+		await act(async () => {
+			requireSnapshot(latestSnapshot).handleAddHomeTerminalTab();
+			await flushPromises();
+		});
+
+		expect(requireSnapshot(latestSnapshot).homeTerminalTaskId).toBe("__home_terminal__:2");
+		expect(requireSnapshot(latestSnapshot).homeTerminalTabs).toHaveLength(2);
+		expect(startShellSessionMutateMock).toHaveBeenCalledTimes(1);
+		expect(startShellSessionMutateMock).toHaveBeenLastCalledWith(
+			expect.objectContaining({
+				taskId: "__home_terminal__:2",
+			}),
+		);
+
+		await act(async () => {
+			requireSnapshot(latestSnapshot).handleSelectHomeTerminalTab("__home_terminal__");
+			await flushPromises();
+		});
+
+		expect(requireSnapshot(latestSnapshot).homeTerminalTaskId).toBe("__home_terminal__");
+		expect(startShellSessionMutateMock).toHaveBeenCalledTimes(2);
+		expect(startShellSessionMutateMock).toHaveBeenLastCalledWith(
+			expect.objectContaining({
+				taskId: "__home_terminal__",
+			}),
+		);
+	});
+
+	it("closes home terminal tabs and selects an adjacent tab", async () => {
+		let latestSnapshot: HookSnapshot | null = null;
+
+		await act(async () => {
+			root.render(
+				<HookHarness
+					selectedCard={null}
+					onSnapshot={(snapshot) => {
+						latestSnapshot = snapshot;
+					}}
+				/>,
+			);
+			await flushPromises();
+		});
+
+		await act(async () => {
+			requireSnapshot(latestSnapshot).handleAddHomeTerminalTab();
+			await flushPromises();
+		});
+
+		expect(requireSnapshot(latestSnapshot).homeTerminalTaskId).toBe("__home_terminal__:2");
+		expect(requireSnapshot(latestSnapshot).isHomeTerminalOpen).toBe(true);
+
+		await act(async () => {
+			requireSnapshot(latestSnapshot).handleCloseHomeTerminalTab("__home_terminal__:2");
+			await flushPromises();
+		});
+
+		expect(requireSnapshot(latestSnapshot).homeTerminalTaskId).toBe("__home_terminal__");
+		expect(requireSnapshot(latestSnapshot).homeTerminalTabs).toEqual([
+			{
+				taskId: "__home_terminal__",
+				ordinal: 1,
+			},
+		]);
+		expect(requireSnapshot(latestSnapshot).isHomeTerminalOpen).toBe(true);
+		expect(startShellSessionMutateMock).toHaveBeenCalledTimes(2);
+		expect(startShellSessionMutateMock).toHaveBeenLastCalledWith(
+			expect.objectContaining({
+				taskId: "__home_terminal__",
+			}),
+		);
+		expect(stopTaskSessionMock).toHaveBeenCalledWith("__home_terminal__:2");
+
+		await act(async () => {
+			requireSnapshot(latestSnapshot).handleCloseHomeTerminalTab("__home_terminal__");
+			await flushPromises();
+		});
+
+		expect(requireSnapshot(latestSnapshot).homeTerminalTaskId).toBe("__home_terminal__");
+		expect(requireSnapshot(latestSnapshot).homeTerminalTabs).toEqual([
+			{
+				taskId: "__home_terminal__",
+				ordinal: 1,
+			},
+		]);
+		expect(requireSnapshot(latestSnapshot).isHomeTerminalOpen).toBe(false);
+		expect(stopTaskSessionMock).toHaveBeenCalledWith("__home_terminal__");
+	});
+
+	it("restores home terminal tabs after remounting", async () => {
+		let latestSnapshot: HookSnapshot | null = null;
+
+		const renderHarness = async (): Promise<void> => {
+			await act(async () => {
+				root.render(
+					<HookHarness
+						selectedCard={null}
+						onSnapshot={(snapshot) => {
+							latestSnapshot = snapshot;
+						}}
+					/>,
+				);
+				await flushPromises();
+			});
+		};
+
+		await renderHarness();
+
+		await act(async () => {
+			requireSnapshot(latestSnapshot).handleAddHomeTerminalTab();
+			await flushPromises();
+		});
+
+		expect(requireSnapshot(latestSnapshot).homeTerminalTaskId).toBe("__home_terminal__:2");
+		expect(requireSnapshot(latestSnapshot).homeTerminalTabs).toHaveLength(2);
+		expect(requireSnapshot(latestSnapshot).isHomeTerminalOpen).toBe(true);
+
+		await act(async () => {
+			root.unmount();
+			root = createRoot(container);
+			await flushPromises();
+		});
+
+		await renderHarness();
+
+		expect(requireSnapshot(latestSnapshot).homeTerminalTaskId).toBe("__home_terminal__:2");
+		expect(requireSnapshot(latestSnapshot).homeTerminalTabs).toEqual([
+			{
+				taskId: "__home_terminal__",
+				ordinal: 1,
+			},
+			{
+				taskId: "__home_terminal__:2",
+				ordinal: 2,
+			},
+		]);
+		expect(requireSnapshot(latestSnapshot).isHomeTerminalOpen).toBe(true);
+	});
+
+	it("creates and switches detail terminal tabs per selected task", async () => {
+		let latestSnapshot: HookSnapshot | null = null;
+		const selection = createSelection("task-a");
+
+		await act(async () => {
+			root.render(
+				<HookHarness
+					selectedCard={selection}
+					onSnapshot={(snapshot) => {
+						latestSnapshot = snapshot;
+					}}
+				/>,
+			);
+			await flushPromises();
+		});
+
+		expect(requireSnapshot(latestSnapshot).detailTerminalTaskId).toBe("__detail_terminal__:task-a");
+		expect(requireSnapshot(latestSnapshot).detailTerminalTabs).toEqual([
+			{
+				taskId: "__detail_terminal__:task-a",
+				ordinal: 1,
+			},
+		]);
+
+		await act(async () => {
+			requireSnapshot(latestSnapshot).handleAddDetailTerminalTab();
+			await flushPromises();
+		});
+
+		expect(requireSnapshot(latestSnapshot).detailTerminalTaskId).toBe("__detail_terminal__:task-a:2");
+		expect(requireSnapshot(latestSnapshot).detailTerminalTabs).toHaveLength(2);
+		expect(startShellSessionMutateMock).toHaveBeenCalledTimes(1);
+		expect(startShellSessionMutateMock).toHaveBeenLastCalledWith(
+			expect.objectContaining({
+				taskId: "__detail_terminal__:task-a:2",
+				workspaceTaskId: "task-a",
+			}),
+		);
+
+		await act(async () => {
+			requireSnapshot(latestSnapshot).handleSelectDetailTerminalTab("__detail_terminal__:task-a");
+			await flushPromises();
+		});
+
+		expect(requireSnapshot(latestSnapshot).detailTerminalTaskId).toBe("__detail_terminal__:task-a");
+		expect(startShellSessionMutateMock).toHaveBeenCalledTimes(2);
+		expect(startShellSessionMutateMock).toHaveBeenLastCalledWith(
+			expect.objectContaining({
+				taskId: "__detail_terminal__:task-a",
+				workspaceTaskId: "task-a",
+			}),
+		);
+	});
+
+	it("closes detail terminal tabs and selects an adjacent tab", async () => {
+		let latestSnapshot: HookSnapshot | null = null;
+		const selection = createSelection("task-a");
+
+		await act(async () => {
+			root.render(
+				<HookHarness
+					selectedCard={selection}
+					onSnapshot={(snapshot) => {
+						latestSnapshot = snapshot;
+					}}
+				/>,
+			);
+			await flushPromises();
+		});
+
+		await act(async () => {
+			requireSnapshot(latestSnapshot).handleAddDetailTerminalTab();
+			await flushPromises();
+		});
+
+		expect(requireSnapshot(latestSnapshot).detailTerminalTaskId).toBe("__detail_terminal__:task-a:2");
+		expect(requireSnapshot(latestSnapshot).isDetailTerminalOpen).toBe(true);
+
+		await act(async () => {
+			requireSnapshot(latestSnapshot).handleCloseDetailTerminalTab("__detail_terminal__:task-a:2");
+			await flushPromises();
+		});
+
+		expect(requireSnapshot(latestSnapshot).detailTerminalTaskId).toBe("__detail_terminal__:task-a");
+		expect(requireSnapshot(latestSnapshot).detailTerminalTabs).toEqual([
+			{
+				taskId: "__detail_terminal__:task-a",
+				ordinal: 1,
+			},
+		]);
+		expect(requireSnapshot(latestSnapshot).isDetailTerminalOpen).toBe(true);
+		expect(startShellSessionMutateMock).toHaveBeenCalledTimes(2);
+		expect(startShellSessionMutateMock).toHaveBeenLastCalledWith(
+			expect.objectContaining({
+				taskId: "__detail_terminal__:task-a",
+				workspaceTaskId: "task-a",
+			}),
+		);
+		expect(stopTaskSessionMock).toHaveBeenCalledWith("__detail_terminal__:task-a:2");
+
+		await act(async () => {
+			requireSnapshot(latestSnapshot).handleCloseDetailTerminalTab("__detail_terminal__:task-a");
+			await flushPromises();
+		});
+
+		expect(requireSnapshot(latestSnapshot).detailTerminalTaskId).toBe("__detail_terminal__:task-a");
+		expect(requireSnapshot(latestSnapshot).detailTerminalTabs).toEqual([
+			{
+				taskId: "__detail_terminal__:task-a",
+				ordinal: 1,
+			},
+		]);
+		expect(requireSnapshot(latestSnapshot).isDetailTerminalOpen).toBe(false);
+		expect(stopTaskSessionMock).toHaveBeenCalledWith("__detail_terminal__:task-a");
+	});
+
+	it("restores detail terminal tabs after remounting", async () => {
+		let latestSnapshot: HookSnapshot | null = null;
+		const selection = createSelection("task-a");
+
+		const renderHarness = async (): Promise<void> => {
+			await act(async () => {
+				root.render(
+					<HookHarness
+						selectedCard={selection}
+						onSnapshot={(snapshot) => {
+							latestSnapshot = snapshot;
+						}}
+					/>,
+				);
+				await flushPromises();
+			});
+		};
+
+		await renderHarness();
+
+		await act(async () => {
+			requireSnapshot(latestSnapshot).handleAddDetailTerminalTab();
+			await flushPromises();
+		});
+
+		expect(requireSnapshot(latestSnapshot).detailTerminalTaskId).toBe("__detail_terminal__:task-a:2");
+		expect(requireSnapshot(latestSnapshot).detailTerminalTabs).toHaveLength(2);
+		expect(requireSnapshot(latestSnapshot).isDetailTerminalOpen).toBe(true);
+
+		await act(async () => {
+			root.unmount();
+			root = createRoot(container);
+			await flushPromises();
+		});
+
+		await renderHarness();
+
+		expect(requireSnapshot(latestSnapshot).detailTerminalTaskId).toBe("__detail_terminal__:task-a:2");
+		expect(requireSnapshot(latestSnapshot).detailTerminalTabs).toEqual([
+			{
+				taskId: "__detail_terminal__:task-a",
+				ordinal: 1,
+			},
+			{
+				taskId: "__detail_terminal__:task-a:2",
+				ordinal: 2,
+			},
+		]);
+		expect(requireSnapshot(latestSnapshot).isDetailTerminalOpen).toBe(true);
 	});
 
 	it("shares the last resized bottom terminal height across home and detail panes", async () => {

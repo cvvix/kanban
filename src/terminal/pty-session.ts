@@ -24,11 +24,60 @@ export interface SpawnPtySessionRequest {
 
 type PtyOutputChunk = string | Buffer | Uint8Array;
 
+const PROCESS_GROUP_KILL_GRACE_MS = 2_000;
+const activePtyProcessGroupPids = new Set<number>();
+let didInstallPtyProcessGroupExitCleanup = false;
+
 function normalizeOutputChunk(data: PtyOutputChunk): Buffer {
 	if (typeof data === "string") {
 		return Buffer.from(data, "utf8");
 	}
 	return Buffer.isBuffer(data) ? data : Buffer.from(data);
+}
+
+function isKillableProcessGroupPid(pid: number): boolean {
+	return process.platform !== "win32" && Number.isFinite(pid) && pid > 0;
+}
+
+function killPtyProcessGroup(pid: number, signal: NodeJS.Signals): void {
+	if (!isKillableProcessGroupPid(pid)) {
+		return;
+	}
+	try {
+		process.kill(-pid, signal);
+	} catch {
+		// Best effort: process group may already be gone or inaccessible.
+	}
+}
+
+function cleanupActivePtyProcessGroupsOnExit(): void {
+	for (const pid of activePtyProcessGroupPids) {
+		killPtyProcessGroup(pid, "SIGTERM");
+	}
+	for (const pid of activePtyProcessGroupPids) {
+		killPtyProcessGroup(pid, "SIGKILL");
+	}
+	activePtyProcessGroupPids.clear();
+}
+
+function installPtyProcessGroupExitCleanup(): void {
+	if (didInstallPtyProcessGroupExitCleanup) {
+		return;
+	}
+	didInstallPtyProcessGroupExitCleanup = true;
+	process.once("exit", cleanupActivePtyProcessGroupsOnExit);
+}
+
+function registerPtyProcessGroup(pid: number): void {
+	if (!isKillableProcessGroupPid(pid)) {
+		return;
+	}
+	activePtyProcessGroupPids.add(pid);
+	installPtyProcessGroupExitCleanup();
+}
+
+function unregisterPtyProcessGroup(pid: number): void {
+	activePtyProcessGroupPids.delete(pid);
 }
 
 function isIgnorablePtyWriteError(error: unknown): boolean {
@@ -52,18 +101,14 @@ function isIgnorablePtyResizeError(error: unknown): boolean {
 
 function terminatePtyProcess(ptyProcess: pty.IPty): void {
 	const pid = ptyProcess.pid;
+	killPtyProcessGroup(pid, "SIGTERM");
 	ptyProcess.kill();
-	if (process.platform !== "win32" && Number.isFinite(pid) && pid > 0) {
-		try {
-			process.kill(-pid, "SIGTERM");
-		} catch {
-			// Best effort: process group may already be gone or inaccessible.
-		}
-	}
 }
 
 export class PtySession {
 	private readonly ptyProcess: pty.IPty;
+	private readonly ptyPid: number;
+	private forceKillTimer: NodeJS.Timeout | null = null;
 	private interrupted = false;
 	private exited = false;
 
@@ -73,12 +118,19 @@ export class PtySession {
 		private readonly onExitCallback?: (event: PtyExitEvent) => void,
 	) {
 		this.ptyProcess = ptyProcess;
+		this.ptyPid = ptyProcess.pid;
+		registerPtyProcessGroup(this.ptyPid);
 		(this.ptyProcess.onData as unknown as (listener: (data: PtyOutputChunk) => void) => void)((data) => {
 			const chunk = normalizeOutputChunk(data);
 			this.onDataCallback?.(chunk);
 		});
 		this.ptyProcess.onExit((event) => {
 			this.exited = true;
+			unregisterPtyProcessGroup(this.ptyPid);
+			if (this.forceKillTimer) {
+				clearTimeout(this.forceKillTimer);
+				this.forceKillTimer = null;
+			}
 			this.onExitCallback?.(event);
 		});
 	}
@@ -104,7 +156,7 @@ export class PtySession {
 	}
 
 	get pid(): number {
-		return this.ptyProcess.pid;
+		return this.ptyPid;
 	}
 
 	write(data: string | Buffer): void {
@@ -153,6 +205,16 @@ export class PtySession {
 			this.interrupted = true;
 		}
 		terminatePtyProcess(this.ptyProcess);
+		if (!this.exited && isKillableProcessGroupPid(this.ptyPid) && this.forceKillTimer === null) {
+			this.forceKillTimer = setTimeout(() => {
+				this.forceKillTimer = null;
+				if (!this.exited) {
+					killPtyProcessGroup(this.ptyPid, "SIGKILL");
+					unregisterPtyProcessGroup(this.ptyPid);
+				}
+			}, PROCESS_GROUP_KILL_GRACE_MS);
+			this.forceKillTimer.unref?.();
+		}
 	}
 
 	wasInterrupted(): boolean {
