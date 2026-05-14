@@ -64,18 +64,23 @@ const DEFAULT_COMMIT_PROMPT_TEMPLATE = `You are in a worktree on a detached HEAD
 - Preserve any pre-existing user uncommitted changes in the base worktree.
 
 Steps:
-1. In the current task worktree, stage and create a commit for the pending task changes.
-2. Find where {{base_ref}} is checked out:
+1. Before committing, inspect recent commit subjects from the repository that owns the current task worktree:
+   - Run: git log --format=%s -n 50 {{base_ref}}
+   - If that fails, run: git log --format=%s -n 50 HEAD
+   - Summarize the dominant commit message format from that task repository's history, including whether it uses Conventional Commits, scopes, imperative phrasing, capitalization, issue references, or short plain-English subjects.
+   - Use that dominant format for the new commit message. Do not force Conventional Commits unless the history mostly uses it.
+2. In the current task worktree, stage and create a commit for the pending task changes using that repository-style commit message.
+3. Find where {{base_ref}} is checked out:
    - Run: git worktree list --porcelain
    - If branch {{base_ref}} is checked out in path P, use that P.
    - If not checked out anywhere, use current worktree as P by checking out {{base_ref}} there.
-3. In P, verify current branch is {{base_ref}}.
-4. If P has uncommitted changes, stash them: git -C P stash push -u -m "kanban-pre-cherry-pick"
-5. Cherry-pick the task commit into P. If this fails because .git/index.lock exists, wait briefly for any active git process to finish. If the lock remains and no git process is active, treat the lock as stale, remove it, and retry.
-6. If cherry-pick conflicts, resolve carefully, preserving both the intended task changes and existing user edits.
-7. If step 4 created a new stash entry, restore that stash with: git -C P stash pop <stash-ref>
-8. If stash pop conflicts, resolve them while preserving pre-existing user edits.
-9. Report:
+4. In P, verify current branch is {{base_ref}}.
+5. If P has uncommitted changes, stash them: git -C P stash push -u -m "kanban-pre-cherry-pick"
+6. Cherry-pick the task commit into P. If this fails because .git/index.lock exists, wait briefly for any active git process to finish. If the lock remains and no git process is active, treat the lock as stale, remove it, and retry.
+7. If cherry-pick conflicts, resolve carefully, preserving both the intended task changes and existing user edits.
+8. If step 5 created a new stash entry, restore that stash with: git -C P stash pop <stash-ref>
+9. If stash pop conflicts, resolve them while preserving pre-existing user edits.
+10. Report:
    - Final commit hash
    - Final commit message
    - Whether stash was used

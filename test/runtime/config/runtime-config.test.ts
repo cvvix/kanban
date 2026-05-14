@@ -161,6 +161,29 @@ describe.sequential("runtime-config auto agent selection", () => {
 		}
 	});
 
+	it("asks commit actions to summarize and match the task repository's dominant git history format", async () => {
+		const { path: tempHome, cleanup: cleanupHome } = createTempDir("kanban-home-runtime-config-commit-prompt-");
+		const { path: tempProject, cleanup: cleanupProject } = createTempDir(
+			"kanban-project-runtime-config-commit-prompt-",
+		);
+
+		try {
+			await withTemporaryEnv({ home: tempHome }, async () => {
+				const state = await loadRuntimeConfig(tempProject);
+
+				expect(state.commitPromptTemplateDefault).toContain("git log --format=%s -n 50 {{base_ref}}");
+				expect(state.commitPromptTemplateDefault).toContain("repository that owns the current task worktree");
+				expect(state.commitPromptTemplateDefault).toContain("Summarize the dominant commit message format");
+				expect(state.commitPromptTemplateDefault).toContain("dominant commit message format");
+				expect(state.commitPromptTemplateDefault).toContain("Do not force Conventional Commits");
+				expect(state.commitPromptTemplate).toBe(state.commitPromptTemplateDefault);
+			});
+		} finally {
+			cleanupProject();
+			cleanupHome();
+		}
+	});
+
 	it("treats the home directory as global-only config scope", async () => {
 		const { path: tempHome, cleanup: cleanupHome } = createTempDir("kanban-home-runtime-config-home-scope-");
 
