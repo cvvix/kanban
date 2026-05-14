@@ -73,16 +73,11 @@ function waitForPort(port, timeout = 15000) {
 
 const runtimePort = await findPort(3484);
 const webUiPort = await findPort(4173, new Set([runtimePort]));
-const requestedDevFullArgs = process.argv.slice(2);
-const withShutdownCleanupFlag = "--with-shutdown-cleanup";
-const requestedRuntimeArgs = requestedDevFullArgs.filter((arg) => arg !== withShutdownCleanupFlag);
-const hasExplicitSkipCleanupArg = requestedRuntimeArgs.some((arg) => arg === "--skip-shutdown-cleanup");
-const shouldDefaultSkipShutdownCleanup = !requestedDevFullArgs.includes(withShutdownCleanupFlag);
+const requestedRuntimeArgs = process.argv.slice(2);
 const runtimeCliArgs = [
 	"--port",
 	String(runtimePort),
 	"--no-open",
-	...(shouldDefaultSkipShutdownCleanup && !hasExplicitSkipCleanupArg ? ["--skip-shutdown-cleanup"] : []),
 	...requestedRuntimeArgs,
 ];
 

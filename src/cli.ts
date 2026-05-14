@@ -39,7 +39,6 @@ import { runOnDemandUpdate } from "./update/update";
 
 interface CliOptions {
 	noOpen: boolean;
-	skipShutdownCleanup: boolean;
 	host: string | null;
 	port: { mode: "fixed"; value: number } | { mode: "auto" } | null;
 	https: boolean;
@@ -69,7 +68,6 @@ interface RootCommandOptions {
 	host?: string;
 	port?: { mode: "fixed"; value: number } | { mode: "auto" };
 	open?: boolean;
-	skipShutdownCleanup?: boolean;
 	update?: boolean;
 	https?: boolean;
 	cert?: string;
@@ -134,11 +132,11 @@ function createShutdownIndicator(stream: NodeJS.WriteStream = process.stderr): S
 			}
 			running = true;
 			if (!stream.isTTY) {
-				stream.write("Cleaning up...\n");
+				stream.write("Shutting down...\n");
 				return;
 			}
 			spinner = ora({
-				text: "Cleaning up...",
+				text: "Shutting down...",
 				stream,
 			}).start();
 		},
@@ -149,18 +147,18 @@ function createShutdownIndicator(stream: NodeJS.WriteStream = process.stderr): S
 			running = false;
 			if (spinner) {
 				if (result === "done") {
-					spinner.succeed("Cleaning up... done");
+					spinner.succeed("Shutting down... done");
 				} else if (result === "failed") {
-					spinner.fail("Cleaning up... failed");
+					spinner.fail("Shutting down... failed");
 				} else {
-					spinner.warn("Cleaning up... interrupted");
+					spinner.warn("Shutting down... interrupted");
 				}
 				spinner = null;
 				return;
 			}
 
 			const suffix = result === "done" ? "done" : result === "interrupted" ? "interrupted" : "failed";
-			stream.write(`Cleanup ${suffix}.\n`);
+			stream.write(`Shutdown ${suffix}.\n`);
 		},
 	};
 }
@@ -374,7 +372,7 @@ async function runScopedCommand(command: string, cwd: string): Promise<RuntimeCo
 async function startServer(): Promise<{
 	url: string;
 	close: () => Promise<void>;
-	shutdown: (options?: { skipSessionCleanup?: boolean }) => Promise<void>;
+	shutdown: () => Promise<void>;
 }> {
 	/*
 		Server-only modules are loaded lazily because task-oriented subcommands like
@@ -499,14 +497,10 @@ async function startServer(): Promise<{
 		await runtimeServer.close();
 	};
 
-	const shutdown = async (options?: { skipSessionCleanup?: boolean }) => {
+	const shutdown = async () => {
 		await shutdownRuntimeServer({
 			workspaceRegistry,
-			warn: (message) => {
-				console.warn(`[kanban] ${message}`);
-			},
 			closeRuntimeServer: close,
-			skipSessionCleanup: options?.skipSessionCleanup ?? false,
 		});
 	};
 
@@ -613,12 +607,7 @@ async function runMainCommand(options: CliOptions, shouldAutoOpenBrowser: boolea
 		}
 		isShuttingDown = true;
 		runPendingAutoUpdateOnShutdown();
-		if (options.skipShutdownCleanup) {
-			console.warn("Skipping shutdown task cleanup for this instance.");
-		}
-		await runtime.shutdown({
-			skipSessionCleanup: options.skipShutdownCleanup,
-		});
+		await runtime.shutdown();
 		await disposeCliTelemetryService().catch(() => {});
 	};
 
@@ -682,7 +671,6 @@ function createProgram(invocationArgs: string[]): Command {
 		.option("--host <ip>", "Host IP to bind the server to (default: 127.0.0.1).")
 		.option("--port <number|auto>", "Runtime port (1-65535) or auto.", parseCliPortValue)
 		.option("--no-open", "Do not open browser automatically.")
-		.option("--skip-shutdown-cleanup", "Do not move sessions to done or delete task worktrees on shutdown.")
 		.option("--https", "Enable HTTPS. Requires both --cert and --key.")
 		.option("--cert <path>", "Path to a TLS certificate PEM file (implies HTTPS).")
 		.option("--key <path>", "Path to a TLS private key PEM file (implies HTTPS).")
@@ -695,6 +683,7 @@ function createProgram(invocationArgs: string[]): Command {
 		.addHelpText("after", `\nRuntime URL: ${getKanbanRuntimeOrigin()}`);
 
 	program.addOption(new Option("--agent <id>", "Deprecated compatibility flag. Ignored.").hideHelp());
+	program.addOption(new Option("--skip-shutdown-cleanup", "Deprecated compatibility flag. Ignored.").hideHelp());
 
 	registerTaskCommand(program);
 	registerHooksCommand(program);
@@ -723,7 +712,6 @@ function createProgram(invocationArgs: string[]): Command {
 				host: options.host ?? null,
 				port: options.port ?? null,
 				noOpen: options.open === false,
-				skipShutdownCleanup: options.skipShutdownCleanup === true,
 				https: options.https === true,
 				cert: options.cert ?? null,
 				key: options.key ?? null,

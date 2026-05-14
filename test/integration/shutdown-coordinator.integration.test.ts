@@ -1,5 +1,5 @@
 import { spawnSync } from "node:child_process";
-import { mkdirSync } from "node:fs";
+import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
 import { describe, expect, it, vi } from "vitest";
@@ -8,6 +8,10 @@ import type { RuntimeBoardData, RuntimeTaskSessionSummary } from "../../src/core
 import { shutdownRuntimeServer } from "../../src/server/shutdown-coordinator";
 import { loadWorkspaceState, saveWorkspaceState } from "../../src/state/workspace-state";
 import type { TerminalSessionManager } from "../../src/terminal/session-manager";
+import {
+	getWorkspaceFolderLabelForWorktreePath,
+	KANBAN_TASK_WORKTREES_HOME_DIR_NAME,
+} from "../../src/workspace/task-worktree-path";
 import { createGitTestEnv } from "../utilities/git-env";
 import { createTempDir } from "../utilities/temp-dir";
 
@@ -77,6 +81,18 @@ function createBoard(taskIds: { inProgress?: string[]; review?: string[] }): Run
 	};
 }
 
+function createTaskWorktreeDirectory(homePath: string, repoPath: string, taskId: string): string {
+	const worktreePath = join(
+		homePath,
+		KANBAN_TASK_WORKTREES_HOME_DIR_NAME,
+		taskId,
+		getWorkspaceFolderLabelForWorktreePath(repoPath),
+	);
+	mkdirSync(worktreePath, { recursive: true });
+	writeFileSync(join(worktreePath, "marker.txt"), taskId);
+	return worktreePath;
+}
+
 function createSession(taskId: string, state: "running" | "awaiting_review" | "idle"): RuntimeTaskSessionSummary {
 	return {
 		taskId,
@@ -95,7 +111,7 @@ function createSession(taskId: string, state: "running" | "awaiting_review" | "i
 }
 
 describe.sequential("shutdown coordinator integration", () => {
-	it("stops managed terminal sessions even when shutdown cleanup is skipped", async () => {
+	it("stops managed terminal sessions on shutdown", async () => {
 		let didCloseRuntimeServer = false;
 		const markInterruptedAndStopAll = vi.fn(() => [createSession("managed-running", "running")]);
 		const managedTerminalManager = {
@@ -114,19 +130,21 @@ describe.sequential("shutdown coordinator integration", () => {
 					},
 				],
 			},
-			warn: () => {},
 			closeRuntimeServer: async () => {
 				didCloseRuntimeServer = true;
 			},
-			skipSessionCleanup: true,
 		});
 
 		expect(markInterruptedAndStopAll).toHaveBeenCalledTimes(1);
 		expect(didCloseRuntimeServer).toBe(true);
 	});
 
-	it("moves all in-progress and review cards to trash for every indexed project on shutdown", async () => {
+	it("does not move cards or delete worktrees for any project on shutdown", async () => {
 		await withTemporaryHome(async () => {
+			const tempHome = process.env.HOME;
+			if (!tempHome) {
+				throw new Error("Expected temporary HOME to be set.");
+			}
 			const { path: sandboxRoot, cleanup } = createTempDir("kanban-shutdown-scope-");
 			try {
 				const managedProjectPath = join(sandboxRoot, "managed-project");
@@ -137,29 +155,48 @@ describe.sequential("shutdown coordinator integration", () => {
 				initGitRepository(indexedProjectPath);
 
 				const managedInitial = await loadWorkspaceState(managedProjectPath);
+				const managedBoard = createBoard({
+					inProgress: ["managed-running", "managed-missing-session"],
+					review: ["managed-idle"],
+				});
 				await saveWorkspaceState(managedProjectPath, {
-					board: createBoard({
-						inProgress: ["managed-running", "managed-missing-session"],
-						review: ["managed-idle"],
-					}),
+					board: managedBoard,
 					sessions: {
 						"managed-running": createSession("managed-running", "running"),
 						"managed-idle": createSession("managed-idle", "idle"),
 					},
 					expectedRevision: managedInitial.revision,
 				});
+				const managedRunningWorktree = createTaskWorktreeDirectory(tempHome, managedProjectPath, "managed-running");
+				const managedMissingSessionWorktree = createTaskWorktreeDirectory(
+					tempHome,
+					managedProjectPath,
+					"managed-missing-session",
+				);
+				const managedIdleWorktree = createTaskWorktreeDirectory(tempHome, managedProjectPath, "managed-idle");
 
 				const indexedInitial = await loadWorkspaceState(indexedProjectPath);
+				const indexedBoard = createBoard({
+					inProgress: ["indexed-missing-session"],
+					review: ["indexed-awaiting-review"],
+				});
 				await saveWorkspaceState(indexedProjectPath, {
-					board: createBoard({
-						inProgress: ["indexed-missing-session"],
-						review: ["indexed-awaiting-review"],
-					}),
+					board: indexedBoard,
 					sessions: {
 						"indexed-awaiting-review": createSession("indexed-awaiting-review", "awaiting_review"),
 					},
 					expectedRevision: indexedInitial.revision,
 				});
+				const indexedMissingSessionWorktree = createTaskWorktreeDirectory(
+					tempHome,
+					indexedProjectPath,
+					"indexed-missing-session",
+				);
+				const indexedAwaitingReviewWorktree = createTaskWorktreeDirectory(
+					tempHome,
+					indexedProjectPath,
+					"indexed-awaiting-review",
+				);
 
 				let didCloseRuntimeServer = false;
 				const managedTerminalManager = {
@@ -185,7 +222,6 @@ describe.sequential("shutdown coordinator integration", () => {
 							},
 						],
 					},
-					warn: () => {},
 					closeRuntimeServer: async () => {
 						didCloseRuntimeServer = true;
 					},
@@ -194,21 +230,20 @@ describe.sequential("shutdown coordinator integration", () => {
 				expect(didCloseRuntimeServer).toBe(true);
 
 				const managedAfter = await loadWorkspaceState(managedProjectPath);
-				const managedTrash = managedAfter.board.columns.find((column) => column.id === "trash")?.cards ?? [];
-				expect(managedTrash.map((card) => card.id).sort()).toEqual(
-					["managed-idle", "managed-missing-session", "managed-running"].sort(),
-				);
-				expect(managedAfter.sessions["managed-running"]?.state).toBe("interrupted");
-				expect(managedAfter.sessions["managed-idle"]?.state).toBe("interrupted");
+				expect(managedAfter.board).toEqual(managedBoard);
+				expect(managedAfter.sessions["managed-running"]?.state).toBe("running");
+				expect(managedAfter.sessions["managed-idle"]?.state).toBe("idle");
 				expect(managedAfter.sessions["managed-missing-session"]).toBeUndefined();
+				expect(existsSync(managedRunningWorktree)).toBe(true);
+				expect(existsSync(managedMissingSessionWorktree)).toBe(true);
+				expect(existsSync(managedIdleWorktree)).toBe(true);
 
 				const indexedAfter = await loadWorkspaceState(indexedProjectPath);
-				const indexedTrash = indexedAfter.board.columns.find((column) => column.id === "trash")?.cards ?? [];
-				expect(indexedTrash.map((card) => card.id).sort()).toEqual(
-					["indexed-awaiting-review", "indexed-missing-session"].sort(),
-				);
-				expect(indexedAfter.sessions["indexed-awaiting-review"]?.state).toBe("interrupted");
+				expect(indexedAfter.board).toEqual(indexedBoard);
+				expect(indexedAfter.sessions["indexed-awaiting-review"]?.state).toBe("awaiting_review");
 				expect(indexedAfter.sessions["indexed-missing-session"]).toBeUndefined();
+				expect(existsSync(indexedMissingSessionWorktree)).toBe(true);
+				expect(existsSync(indexedAwaitingReviewWorktree)).toBe(true);
 			} finally {
 				cleanup();
 			}
